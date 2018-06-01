@@ -7,32 +7,29 @@ import (
 	"net/http"
 	"strings"
 
-	l4g "github.com/alecthomas/log4go"
-
 	"github.com/mattermost/mattermost-server/app"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
+	"github.com/mattermost/mattermost-server/web"
+)
+
+const (
+	EMOJI_MAX_AUTOCOMPLETE_ITEMS = 100
 )
 
 func (api *API) InitEmoji() {
-	l4g.Debug(utils.T("api.emoji.init.debug"))
-
 	api.BaseRoutes.Emojis.Handle("", api.ApiSessionRequired(createEmoji)).Methods("POST")
 	api.BaseRoutes.Emojis.Handle("", api.ApiSessionRequired(getEmojiList)).Methods("GET")
+	api.BaseRoutes.Emojis.Handle("/search", api.ApiSessionRequired(searchEmojis)).Methods("POST")
+	api.BaseRoutes.Emojis.Handle("/autocomplete", api.ApiSessionRequired(autocompleteEmojis)).Methods("GET")
 	api.BaseRoutes.Emoji.Handle("", api.ApiSessionRequired(deleteEmoji)).Methods("DELETE")
 	api.BaseRoutes.Emoji.Handle("", api.ApiSessionRequired(getEmoji)).Methods("GET")
+	api.BaseRoutes.EmojiByName.Handle("", api.ApiSessionRequired(getEmojiByName)).Methods("GET")
 	api.BaseRoutes.Emoji.Handle("/image", api.ApiSessionRequiredTrustRequester(getEmojiImage)).Methods("GET")
 }
 
 func createEmoji(c *Context, w http.ResponseWriter, r *http.Request) {
 	if !*c.App.Config().ServiceSettings.EnableCustomEmoji {
 		c.Err = model.NewAppError("createEmoji", "api.emoji.disabled.app_error", nil, "", http.StatusNotImplemented)
-		return
-	}
-
-	if emojiInterface := c.App.Emoji; emojiInterface != nil &&
-		!emojiInterface.CanUserCreateEmoji(c.Session.Roles, c.Session.TeamMembers) {
-		c.Err = model.NewAppError("getEmoji", "api.emoji.disabled.app_error", nil, "user_id="+c.Session.UserId, http.StatusUnauthorized)
 		return
 	}
 
@@ -49,6 +46,28 @@ func createEmoji(c *Context, w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(app.MaxEmojiFileSize); err != nil {
 		c.Err = model.NewAppError("createEmoji", "api.emoji.create.parse.app_error", nil, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// Allow any user with MANAGE_EMOJIS permission at Team level to manage emojis at system level
+	memberships, err := c.App.GetTeamMembersForUser(c.Session.UserId)
+
+	if err != nil {
+		c.Err = err
+		return
+	}
+
+	if !c.App.SessionHasPermissionTo(c.Session, model.PERMISSION_MANAGE_EMOJIS) {
+		hasPermission := false
+		for _, membership := range memberships {
+			if c.App.SessionHasPermissionToTeam(c.Session, membership.TeamId, model.PERMISSION_MANAGE_EMOJIS) {
+				hasPermission = true
+				break
+			}
+		}
+		if !hasPermission {
+			c.SetPermissionError(model.PERMISSION_MANAGE_EMOJIS)
+			return
+		}
 	}
 
 	m := r.MultipartForm
@@ -80,7 +99,13 @@ func getEmojiList(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	listEmoji, err := c.App.GetEmojiList(c.Params.Page, c.Params.PerPage)
+	sort := r.URL.Query().Get("sort")
+	if sort != "" && sort != model.EMOJI_SORT_BY_NAME {
+		c.SetInvalidUrlParam("sort")
+		return
+	}
+
+	listEmoji, err := c.App.GetEmojiList(c.Params.Page, c.Params.PerPage, sort)
 	if err != nil {
 		c.Err = err
 		return
@@ -101,9 +126,43 @@ func deleteEmoji(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if c.Session.UserId != emoji.CreatorId && !c.App.SessionHasPermissionTo(c.Session, model.PERMISSION_MANAGE_SYSTEM) {
-		c.Err = model.NewAppError("deleteImage", "api.emoji.delete.permissions.app_error", nil, "user_id="+c.Session.UserId, http.StatusUnauthorized)
+	// Allow any user with MANAGE_EMOJIS permission at Team level to manage emojis at system level
+	memberships, err := c.App.GetTeamMembersForUser(c.Session.UserId)
+
+	if err != nil {
+		c.Err = err
 		return
+	}
+
+	if !c.App.SessionHasPermissionTo(c.Session, model.PERMISSION_MANAGE_EMOJIS) {
+		hasPermission := false
+		for _, membership := range memberships {
+			if c.App.SessionHasPermissionToTeam(c.Session, membership.TeamId, model.PERMISSION_MANAGE_EMOJIS) {
+				hasPermission = true
+				break
+			}
+		}
+		if !hasPermission {
+			c.SetPermissionError(model.PERMISSION_MANAGE_EMOJIS)
+			return
+		}
+	}
+
+	if c.Session.UserId != emoji.CreatorId {
+		if !c.App.SessionHasPermissionTo(c.Session, model.PERMISSION_MANAGE_OTHERS_EMOJIS) {
+			hasPermission := false
+			for _, membership := range memberships {
+				if c.App.SessionHasPermissionToTeam(c.Session, membership.TeamId, model.PERMISSION_MANAGE_OTHERS_EMOJIS) {
+					hasPermission = true
+					break
+				}
+			}
+
+			if !hasPermission {
+				c.SetPermissionError(model.PERMISSION_MANAGE_OTHERS_EMOJIS)
+				return
+			}
+		}
 	}
 
 	err = c.App.DeleteEmoji(emoji)
@@ -127,6 +186,21 @@ func getEmoji(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	emoji, err := c.App.GetEmoji(c.Params.EmojiId)
+	if err != nil {
+		c.Err = err
+		return
+	} else {
+		w.Write([]byte(emoji.ToJson()))
+	}
+}
+
+func getEmojiByName(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireEmojiName()
+	if c.Err != nil {
+		return
+	}
+
+	emoji, err := c.App.GetEmojiByName(c.Params.EmojiName)
 	if err != nil {
 		c.Err = err
 		return
@@ -160,4 +234,42 @@ func getEmojiImage(c *Context, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/"+imageType)
 	w.Header().Set("Cache-Control", "max-age=2592000, public")
 	w.Write(image)
+}
+
+func searchEmojis(c *Context, w http.ResponseWriter, r *http.Request) {
+	emojiSearch := model.EmojiSearchFromJson(r.Body)
+	if emojiSearch == nil {
+		c.SetInvalidParam("term")
+		return
+	}
+
+	if emojiSearch.Term == "" {
+		c.SetInvalidParam("term")
+		return
+	}
+
+	emojis, err := c.App.SearchEmoji(emojiSearch.Term, emojiSearch.PrefixOnly, web.PER_PAGE_MAXIMUM)
+	if err != nil {
+		c.Err = err
+		return
+	} else {
+		w.Write([]byte(model.EmojiListToJson(emojis)))
+	}
+}
+
+func autocompleteEmojis(c *Context, w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+
+	if name == "" {
+		c.SetInvalidUrlParam("name")
+		return
+	}
+
+	emojis, err := c.App.SearchEmoji(name, true, EMOJI_MAX_AUTOCOMPLETE_ITEMS)
+	if err != nil {
+		c.Err = err
+		return
+	} else {
+		w.Write([]byte(model.EmojiListToJson(emojis)))
+	}
 }

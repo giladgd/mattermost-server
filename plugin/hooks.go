@@ -5,6 +5,8 @@ package plugin
 
 import (
 	"net/http"
+
+	"github.com/mattermost/mattermost-server/model"
 )
 
 // Methods from the Hooks interface can be used by a plugin to respond to events. Methods are likely
@@ -30,4 +32,41 @@ type Hooks interface {
 	// The Mattermost-User-Id header will be present if (and only if) the request is by an
 	// authenticated user.
 	ServeHTTP(http.ResponseWriter, *http.Request)
+
+	// ExecuteCommand executes a command that has been previously registered via the RegisterCommand
+	// API.
+	ExecuteCommand(args *model.CommandArgs) (*model.CommandResponse, *model.AppError)
+
+	// MessageWillBePosted is invoked when a message is posted by a user before it is commited
+	// to the database. If you also want to act on edited posts, see MessageWillBeUpdated.
+	// Return values should be the modified post or nil if rejected and an explanation for the user.
+	//
+	// If you don't need to modify or reject posts, use MessageHasBeenPosted instead.
+	//
+	// Note that this method will be called for posts created by plugins, including the plugin that
+	// created the post.
+	MessageWillBePosted(post *model.Post) (*model.Post, string)
+
+	// MessageWillBeUpdated is invoked when a message is updated by a user before it is commited
+	// to the database. If you also want to act on new posts, see MessageWillBePosted.
+	// Return values should be the modified post or nil if rejected and an explanation for the user.
+	// On rejection, the post will be kept in its previous state.
+	//
+	// If you don't need to modify or rejected updated posts, use MessageHasBeenUpdated instead.
+	//
+	// Note that this method will be called for posts updated by plugins, including the plugin that
+	// updated the post.
+	MessageWillBeUpdated(newPost, oldPost *model.Post) (*model.Post, string)
+
+	// MessageHasBeenPosted is invoked after the message has been commited to the databse.
+	// If you need to modify or reject the post, see MessageWillBePosted
+	// Note that this method will be called for posts created by plugins, including the plugin that
+	// created the post.
+	MessageHasBeenPosted(post *model.Post)
+
+	// MessageHasBeenUpdated is invoked after a message is updated and has been updated in the databse.
+	// If you need to modify or reject the post, see MessageWillBeUpdated
+	// Note that this method will be called for posts created by plugins, including the plugin that
+	// created the post.
+	MessageHasBeenUpdated(newPost, oldPost *model.Post)
 }

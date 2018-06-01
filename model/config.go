@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -21,8 +22,13 @@ const (
 	IMAGE_DRIVER_LOCAL = "local"
 	IMAGE_DRIVER_S3    = "amazons3"
 
+	DATABASE_DRIVER_SQLITE   = "sqlite3"
 	DATABASE_DRIVER_MYSQL    = "mysql"
 	DATABASE_DRIVER_POSTGRES = "postgres"
+
+	MINIO_ACCESS_KEY = "minioaccesskey"
+	MINIO_SECRET_KEY = "miniosecretkey"
+	MINIO_BUCKET     = "mattermost-test"
 
 	PASSWORD_MAXIMUM_LENGTH = 64
 	PASSWORD_MINIMUM_LENGTH = 5
@@ -30,10 +36,6 @@ const (
 	SERVICE_GITLAB    = "gitlab"
 	SERVICE_GOOGLE    = "google"
 	SERVICE_OFFICE365 = "office365"
-
-	WEBSERVER_MODE_REGULAR  = "regular"
-	WEBSERVER_MODE_GZIP     = "gzip"
-	WEBSERVER_MODE_DISABLED = "disabled"
 
 	GENERIC_NO_CHANNEL_NOTIFICATION = "generic_no_channel"
 	GENERIC_NOTIFICATION            = "generic"
@@ -65,6 +67,10 @@ const (
 	ALLOW_EDIT_POST_NEVER      = "never"
 	ALLOW_EDIT_POST_TIME_LIMIT = "time_limit"
 
+	GROUP_UNREAD_CHANNELS_DISABLED    = "disabled"
+	GROUP_UNREAD_CHANNELS_DEFAULT_ON  = "default_on"
+	GROUP_UNREAD_CHANNELS_DEFAULT_OFF = "default_off"
+
 	EMAIL_BATCHING_BUFFER_SIZE = 256
 	EMAIL_BATCHING_INTERVAL    = 30
 
@@ -91,15 +97,12 @@ const (
 
 	EMAIL_SETTINGS_DEFAULT_FEEDBACK_ORGANIZATION = ""
 
-	SUPPORT_SETTINGS_DEFAULT_TERMS_OF_SERVICE_LINK      = "https://about.mattermost.com/default-terms/"
-	SUPPORT_SETTINGS_DEFAULT_PRIVACY_POLICY_LINK        = "https://about.mattermost.com/default-privacy-policy/"
-	SUPPORT_SETTINGS_DEFAULT_ABOUT_LINK                 = "https://about.mattermost.com/default-about/"
-	SUPPORT_SETTINGS_DEFAULT_HELP_LINK                  = "https://about.mattermost.com/default-help/"
-	SUPPORT_SETTINGS_DEFAULT_REPORT_A_PROBLEM_LINK      = "https://about.mattermost.com/default-report-a-problem/"
-	SUPPORT_SETTINGS_DEFAULT_ADMINISTRATORS_GUIDE_LINK  = "https://about.mattermost.com/administrators-guide/"
-	SUPPORT_SETTINGS_DEFAULT_TROUBLESHOOTING_FORUM_LINK = "https://about.mattermost.com/troubleshooting-forum/"
-	SUPPORT_SETTINGS_DEFAULT_COMMERCIAL_SUPPORT_LINK    = "https://about.mattermost.com/commercial-support/"
-	SUPPORT_SETTINGS_DEFAULT_SUPPORT_EMAIL              = "feedback@mattermost.com"
+	SUPPORT_SETTINGS_DEFAULT_TERMS_OF_SERVICE_LINK = "https://about.mattermost.com/default-terms/"
+	SUPPORT_SETTINGS_DEFAULT_PRIVACY_POLICY_LINK   = "https://about.mattermost.com/default-privacy-policy/"
+	SUPPORT_SETTINGS_DEFAULT_ABOUT_LINK            = "https://about.mattermost.com/default-about/"
+	SUPPORT_SETTINGS_DEFAULT_HELP_LINK             = "https://about.mattermost.com/default-help/"
+	SUPPORT_SETTINGS_DEFAULT_REPORT_A_PROBLEM_LINK = "https://about.mattermost.com/default-report-a-problem/"
+	SUPPORT_SETTINGS_DEFAULT_SUPPORT_EMAIL         = "feedback@mattermost.com"
 
 	LDAP_SETTINGS_DEFAULT_FIRST_NAME_ATTRIBUTE = ""
 	LDAP_SETTINGS_DEFAULT_LAST_NAME_ATTRIBUTE  = ""
@@ -148,69 +151,90 @@ const (
 	DATA_RETENTION_SETTINGS_DEFAULT_FILE_RETENTION_DAYS     = 365
 	DATA_RETENTION_SETTINGS_DEFAULT_DELETION_JOB_START_TIME = "02:00"
 
-	PLUGIN_SETTINGS_DEFAULT_DIRECTORY = "./plugins"
+	PLUGIN_SETTINGS_DEFAULT_DIRECTORY        = "./plugins"
+	PLUGIN_SETTINGS_DEFAULT_CLIENT_DIRECTORY = "./client/plugins"
+
+	TIMEZONE_SETTINGS_DEFAULT_SUPPORTED_TIMEZONES_PATH = "timezones.json"
+
+	COMPLIANCE_EXPORT_TYPE_ACTIANCE    = "actiance"
+	COMPLIANCE_EXPORT_TYPE_GLOBALRELAY = "globalrelay"
+	GLOBALRELAY_CUSTOMER_TYPE_A9       = "A9"
+	GLOBALRELAY_CUSTOMER_TYPE_A10      = "A10"
 )
 
 type ServiceSettings struct {
-	SiteURL                                  *string
-	LicenseFileLocation                      *string
-	ListenAddress                            *string
-	ConnectionSecurity                       *string
-	TLSCertFile                              *string
-	TLSKeyFile                               *string
-	UseLetsEncrypt                           *bool
-	LetsEncryptCertificateCacheFile          *string
-	Forward80To443                           *bool
-	ReadTimeout                              *int
-	WriteTimeout                             *int
-	MaximumLoginAttempts                     *int
-	GoroutineHealthThreshold                 *int
-	GoogleDeveloperKey                       string
-	EnableOAuthServiceProvider               bool
-	EnableIncomingWebhooks                   bool
-	EnableOutgoingWebhooks                   bool
-	EnableCommands                           *bool
-	EnableOnlyAdminIntegrations              *bool
-	EnablePostUsernameOverride               bool
-	EnablePostIconOverride                   bool
-	EnableAPIv3                              *bool
-	EnableLinkPreviews                       *bool
-	EnableTesting                            bool
-	EnableDeveloper                          *bool
-	EnableSecurityFixAlert                   *bool
-	EnableInsecureOutgoingConnections        *bool
-	AllowedUntrustedInternalConnections      *string
-	EnableMultifactorAuthentication          *bool
-	EnforceMultifactorAuthentication         *bool
-	EnableUserAccessTokens                   *bool
-	AllowCorsFrom                            *string
-	SessionLengthWebInDays                   *int
-	SessionLengthMobileInDays                *int
-	SessionLengthSSOInDays                   *int
-	SessionCacheInMinutes                    *int
-	SessionIdleTimeoutInMinutes              *int
-	WebsocketSecurePort                      *int
-	WebsocketPort                            *int
-	WebserverMode                            *string
-	EnableCustomEmoji                        *bool
-	EnableEmojiPicker                        *bool
-	RestrictCustomEmojiCreation              *string
-	RestrictPostDelete                       *string
-	AllowEditPost                            *string
-	PostEditTimeLimit                        *int
-	TimeBetweenUserTypingUpdatesMilliseconds *int64
-	EnablePostSearch                         *bool
-	EnableUserTypingMessages                 *bool
-	EnableChannelViewedMessages              *bool
-	EnableUserStatuses                       *bool
-	ClusterLogTimeoutMilliseconds            *int
-	CloseUnusedDirectMessages                *bool
-	EnablePreviewFeatures                    *bool
+	SiteURL                                           *string
+	WebsocketURL                                      *string
+	LicenseFileLocation                               *string
+	ListenAddress                                     *string
+	ConnectionSecurity                                *string
+	TLSCertFile                                       *string
+	TLSKeyFile                                        *string
+	UseLetsEncrypt                                    *bool
+	LetsEncryptCertificateCacheFile                   *string
+	Forward80To443                                    *bool
+	ReadTimeout                                       *int
+	WriteTimeout                                      *int
+	MaximumLoginAttempts                              *int
+	GoroutineHealthThreshold                          *int
+	GoogleDeveloperKey                                string
+	EnableOAuthServiceProvider                        bool
+	EnableIncomingWebhooks                            bool
+	EnableOutgoingWebhooks                            bool
+	EnableCommands                                    *bool
+	EnableOnlyAdminIntegrations                       *bool
+	EnablePostUsernameOverride                        bool
+	EnablePostIconOverride                            bool
+	EnableLinkPreviews                                *bool
+	EnableTesting                                     bool
+	EnableDeveloper                                   *bool
+	EnableSecurityFixAlert                            *bool
+	EnableInsecureOutgoingConnections                 *bool
+	AllowedUntrustedInternalConnections               *string
+	EnableMultifactorAuthentication                   *bool
+	EnforceMultifactorAuthentication                  *bool
+	EnableUserAccessTokens                            *bool
+	AllowCorsFrom                                     *string
+	AllowCookiesForSubdomains                         *bool
+	SessionLengthWebInDays                            *int
+	SessionLengthMobileInDays                         *int
+	SessionLengthSSOInDays                            *int
+	SessionCacheInMinutes                             *int
+	SessionIdleTimeoutInMinutes                       *int
+	WebsocketSecurePort                               *int
+	WebsocketPort                                     *int
+	WebserverMode                                     *string
+	EnableCustomEmoji                                 *bool
+	EnableEmojiPicker                                 *bool
+	RestrictCustomEmojiCreation                       *string
+	RestrictPostDelete                                *string
+	AllowEditPost                                     *string
+	PostEditTimeLimit                                 *int
+	TimeBetweenUserTypingUpdatesMilliseconds          *int64
+	EnablePostSearch                                  *bool
+	EnableUserTypingMessages                          *bool
+	EnableChannelViewedMessages                       *bool
+	EnableUserStatuses                                *bool
+	ExperimentalEnableAuthenticationTransfer          *bool
+	ClusterLogTimeoutMilliseconds                     *int
+	CloseUnusedDirectMessages                         *bool
+	EnablePreviewFeatures                             *bool
+	EnableTutorial                                    *bool
+	ExperimentalEnableDefaultChannelLeaveJoinMessages *bool
+	ExperimentalGroupUnreadChannels                   *string
+	ImageProxyType                                    *string
+	ImageProxyURL                                     *string
+	ImageProxyOptions                                 *string
+	EnableAPITeamDeletion                             *bool
 }
 
 func (s *ServiceSettings) SetDefaults() {
 	if s.SiteURL == nil {
 		s.SiteURL = NewString(SERVICE_SETTINGS_DEFAULT_SITE_URL)
+	}
+
+	if s.WebsocketURL == nil {
+		s.WebsocketURL = NewString("")
 	}
 
 	if s.LicenseFileLocation == nil {
@@ -219,10 +243,6 @@ func (s *ServiceSettings) SetDefaults() {
 
 	if s.ListenAddress == nil {
 		s.ListenAddress = NewString(SERVICE_SETTINGS_DEFAULT_LISTEN_AND_ADDRESS)
-	}
-
-	if s.EnableAPIv3 == nil {
-		s.EnableAPIv3 = NewBool(true)
 	}
 
 	if s.EnableLinkPreviews == nil {
@@ -242,7 +262,7 @@ func (s *ServiceSettings) SetDefaults() {
 	}
 
 	if s.AllowedUntrustedInternalConnections == nil {
-		s.AllowedUntrustedInternalConnections = new(string)
+		s.AllowedUntrustedInternalConnections = NewString("")
 	}
 
 	if s.EnableMultifactorAuthentication == nil {
@@ -325,6 +345,10 @@ func (s *ServiceSettings) SetDefaults() {
 		s.CloseUnusedDirectMessages = NewBool(false)
 	}
 
+	if s.EnableTutorial == nil {
+		s.EnableTutorial = NewBool(true)
+	}
+
 	if s.SessionLengthWebInDays == nil {
 		s.SessionLengthWebInDays = NewInt(30)
 	}
@@ -365,6 +389,10 @@ func (s *ServiceSettings) SetDefaults() {
 		s.AllowCorsFrom = NewString(SERVICE_SETTINGS_DEFAULT_ALLOW_CORS_FROM)
 	}
 
+	if s.AllowCookiesForSubdomains == nil {
+		s.AllowCookiesForSubdomains = NewBool(false)
+	}
+
 	if s.WebserverMode == nil {
 		s.WebserverMode = NewString("gzip")
 	} else if *s.WebserverMode == "regular" {
@@ -391,20 +419,59 @@ func (s *ServiceSettings) SetDefaults() {
 		s.AllowEditPost = NewString(ALLOW_EDIT_POST_ALWAYS)
 	}
 
+	if s.ExperimentalEnableAuthenticationTransfer == nil {
+		s.ExperimentalEnableAuthenticationTransfer = NewBool(true)
+	}
+
 	if s.PostEditTimeLimit == nil {
-		s.PostEditTimeLimit = NewInt(300)
+		s.PostEditTimeLimit = NewInt(-1)
+	}
+
+	if s.EnablePreviewFeatures == nil {
+		s.EnablePreviewFeatures = NewBool(true)
+	}
+
+	if s.ExperimentalEnableDefaultChannelLeaveJoinMessages == nil {
+		s.ExperimentalEnableDefaultChannelLeaveJoinMessages = NewBool(true)
+	}
+
+	if s.ExperimentalGroupUnreadChannels == nil {
+		s.ExperimentalGroupUnreadChannels = NewString(GROUP_UNREAD_CHANNELS_DISABLED)
+	} else if *s.ExperimentalGroupUnreadChannels == "0" {
+		s.ExperimentalGroupUnreadChannels = NewString(GROUP_UNREAD_CHANNELS_DISABLED)
+	} else if *s.ExperimentalGroupUnreadChannels == "1" {
+		s.ExperimentalGroupUnreadChannels = NewString(GROUP_UNREAD_CHANNELS_DEFAULT_ON)
+	}
+
+	if s.ImageProxyType == nil {
+		s.ImageProxyType = NewString("")
+	}
+
+	if s.ImageProxyURL == nil {
+		s.ImageProxyURL = NewString("")
+	}
+
+	if s.ImageProxyOptions == nil {
+		s.ImageProxyOptions = NewString("")
+	}
+
+	if s.EnableAPITeamDeletion == nil {
+		s.EnableAPITeamDeletion = NewBool(false)
 	}
 }
 
 type ClusterSettings struct {
-	Enable                *bool
-	ClusterName           *string
-	OverrideHostname      *string
-	UseIpAddress          *bool
-	UseExperimentalGossip *bool
-	ReadOnlyConfig        *bool
-	GossipPort            *int
-	StreamingPort         *int
+	Enable                      *bool
+	ClusterName                 *string
+	OverrideHostname            *string
+	UseIpAddress                *bool
+	UseExperimentalGossip       *bool
+	ReadOnlyConfig              *bool
+	GossipPort                  *int
+	StreamingPort               *int
+	MaxIdleConns                *int
+	MaxIdleConnsPerHost         *int
+	IdleConnTimeoutMilliseconds *int
 }
 
 func (s *ClusterSettings) SetDefaults() {
@@ -438,6 +505,18 @@ func (s *ClusterSettings) SetDefaults() {
 
 	if s.StreamingPort == nil {
 		s.StreamingPort = NewInt(8075)
+	}
+
+	if s.MaxIdleConns == nil {
+		s.MaxIdleConns = NewInt(100)
+	}
+
+	if s.MaxIdleConnsPerHost == nil {
+		s.MaxIdleConnsPerHost = NewInt(128)
+	}
+
+	if s.IdleConnTimeoutMilliseconds == nil {
+		s.IdleConnTimeoutMilliseconds = NewInt(90000)
 	}
 }
 
@@ -522,9 +601,10 @@ func (s *SqlSettings) SetDefaults() {
 type LogSettings struct {
 	EnableConsole          bool
 	ConsoleLevel           string
+	ConsoleJson            *bool
 	EnableFile             bool
 	FileLevel              string
-	FileFormat             string
+	FileJson               *bool
 	FileLocation           string
 	EnableWebhookDebugging bool
 	EnableDiagnostics      *bool
@@ -533,6 +613,14 @@ type LogSettings struct {
 func (s *LogSettings) SetDefaults() {
 	if s.EnableDiagnostics == nil {
 		s.EnableDiagnostics = NewBool(true)
+	}
+
+	if s.ConsoleJson == nil {
+		s.ConsoleJson = NewBool(true)
+	}
+
+	if s.FileJson == nil {
+		s.FileJson = NewBool(true)
 	}
 }
 
@@ -649,6 +737,7 @@ type EmailSettings struct {
 	EnableSignInWithEmail             *bool
 	EnableSignInWithUsername          *bool
 	SendEmailNotifications            bool
+	UseChannelInEmailNotifications    *bool
 	RequireEmailVerification          bool
 	FeedbackName                      string
 	FeedbackEmail                     string
@@ -666,8 +755,12 @@ type EmailSettings struct {
 	EnableEmailBatching               *bool
 	EmailBatchingBufferSize           *int
 	EmailBatchingInterval             *int
+	EnablePreviewModeBanner           *bool
 	SkipServerCertificateVerification *bool
 	EmailNotificationContentsType     *string
+	LoginButtonColor                  *string
+	LoginButtonBorderColor            *string
+	LoginButtonTextColor              *string
 }
 
 func (s *EmailSettings) SetDefaults() {
@@ -681,6 +774,10 @@ func (s *EmailSettings) SetDefaults() {
 
 	if s.EnableSignInWithUsername == nil {
 		s.EnableSignInWithUsername = NewBool(false)
+	}
+
+	if s.UseChannelInEmailNotifications == nil {
+		s.UseChannelInEmailNotifications = NewBool(false)
 	}
 
 	if s.SendPushNotifications == nil {
@@ -711,6 +808,10 @@ func (s *EmailSettings) SetDefaults() {
 		s.EmailBatchingInterval = NewInt(EMAIL_BATCHING_INTERVAL)
 	}
 
+	if s.EnablePreviewModeBanner == nil {
+		s.EnablePreviewModeBanner = NewBool(true)
+	}
+
 	if s.EnableSMTPAuth == nil {
 		s.EnableSMTPAuth = new(bool)
 		if s.ConnectionSecurity == CONN_SECURITY_NONE {
@@ -731,6 +832,18 @@ func (s *EmailSettings) SetDefaults() {
 	if s.EmailNotificationContentsType == nil {
 		s.EmailNotificationContentsType = NewString(EMAIL_NOTIFICATION_CONTENTS_FULL)
 	}
+
+	if s.LoginButtonColor == nil {
+		s.LoginButtonColor = NewString("#0000")
+	}
+
+	if s.LoginButtonBorderColor == nil {
+		s.LoginButtonBorderColor = NewString("#2389D7")
+	}
+
+	if s.LoginButtonTextColor == nil {
+		s.LoginButtonTextColor = NewString("#2389D7")
+	}
 }
 
 type RateLimitSettings struct {
@@ -738,7 +851,8 @@ type RateLimitSettings struct {
 	PerSec           *int
 	MaxBurst         *int
 	MemoryStoreSize  *int
-	VaryByRemoteAddr bool
+	VaryByRemoteAddr *bool
+	VaryByUser       *bool
 	VaryByHeader     string
 }
 
@@ -757,6 +871,14 @@ func (s *RateLimitSettings) SetDefaults() {
 
 	if s.MemoryStoreSize == nil {
 		s.MemoryStoreSize = NewInt(10000)
+	}
+
+	if s.VaryByRemoteAddr == nil {
+		s.VaryByRemoteAddr = NewBool(true)
+	}
+
+	if s.VaryByUser == nil {
+		s.VaryByUser = NewBool(false)
 	}
 }
 
@@ -878,9 +1000,10 @@ func (s *ThemeSettings) SetDefaults() {
 type TeamSettings struct {
 	SiteName                            string
 	MaxUsersPerTeam                     *int
-	EnableTeamCreation                  bool
-	EnableUserCreation                  bool
+	EnableTeamCreation                  *bool
+	EnableUserCreation                  *bool
 	EnableOpenServer                    *bool
+	EnableUserDeactivation              *bool
 	RestrictCreationToDomains           string
 	EnableCustomBrand                   *bool
 	CustomBrandText                     *string
@@ -900,7 +1023,10 @@ type TeamSettings struct {
 	MaxNotificationsPerChannel          *int64
 	EnableConfirmNotificationsToChannel *bool
 	TeammateNameDisplay                 *string
+	ExperimentalEnableAutomaticReplies  *bool
+	ExperimentalHideTownSquareinLHS     *bool
 	ExperimentalTownSquareIsReadOnly    *bool
+	ExperimentalPrimaryTeam             *string
 }
 
 func (s *TeamSettings) SetDefaults() {
@@ -910,6 +1036,10 @@ func (s *TeamSettings) SetDefaults() {
 
 	if s.EnableCustomBrand == nil {
 		s.EnableCustomBrand = NewBool(false)
+	}
+
+	if s.EnableUserDeactivation == nil {
+		s.EnableUserDeactivation = NewBool(false)
 	}
 
 	if s.CustomBrandText == nil {
@@ -993,9 +1123,30 @@ func (s *TeamSettings) SetDefaults() {
 		s.EnableConfirmNotificationsToChannel = NewBool(true)
 	}
 
+	if s.ExperimentalEnableAutomaticReplies == nil {
+		s.ExperimentalEnableAutomaticReplies = NewBool(false)
+	}
+
+	if s.ExperimentalHideTownSquareinLHS == nil {
+		s.ExperimentalHideTownSquareinLHS = NewBool(false)
+	}
+
 	if s.ExperimentalTownSquareIsReadOnly == nil {
 		s.ExperimentalTownSquareIsReadOnly = NewBool(false)
 	}
+
+	if s.ExperimentalPrimaryTeam == nil {
+		s.ExperimentalPrimaryTeam = NewString("")
+	}
+
+	if s.EnableTeamCreation == nil {
+		s.EnableTeamCreation = NewBool(true)
+	}
+
+	if s.EnableUserCreation == nil {
+		s.EnableUserCreation = NewBool(true)
+	}
+
 }
 
 type ClientRequirements struct {
@@ -1029,8 +1180,9 @@ type LdapSettings struct {
 	NicknameAttribute  *string
 	IdAttribute        *string
 	PositionAttribute  *string
+	LoginIdAttribute   *string
 
-	// Syncronization
+	// Synchronization
 	SyncIntervalMinutes *int
 
 	// Advanced
@@ -1040,6 +1192,10 @@ type LdapSettings struct {
 
 	// Customization
 	LoginFieldName *string
+
+	LoginButtonColor       *string
+	LoginButtonBorderColor *string
+	LoginButtonTextColor   *string
 }
 
 func (s *LdapSettings) SetDefaults() {
@@ -1108,6 +1264,12 @@ func (s *LdapSettings) SetDefaults() {
 		s.PositionAttribute = NewString(LDAP_SETTINGS_DEFAULT_POSITION_ATTRIBUTE)
 	}
 
+	// For those upgrading to the version when LoginIdAttribute was added
+	// they need IdAttribute == LoginIdAttribute not to break
+	if s.LoginIdAttribute == nil {
+		s.LoginIdAttribute = s.IdAttribute
+	}
+
 	if s.SyncIntervalMinutes == nil {
 		s.SyncIntervalMinutes = NewInt(60)
 	}
@@ -1126,6 +1288,18 @@ func (s *LdapSettings) SetDefaults() {
 
 	if s.LoginFieldName == nil {
 		s.LoginFieldName = NewString(LDAP_SETTINGS_DEFAULT_LOGIN_FIELD_NAME)
+	}
+
+	if s.LoginButtonColor == nil {
+		s.LoginButtonColor = NewString("#0000")
+	}
+
+	if s.LoginButtonBorderColor == nil {
+		s.LoginButtonBorderColor = NewString("#2389D7")
+	}
+
+	if s.LoginButtonTextColor == nil {
+		s.LoginButtonTextColor = NewString("#2389D7")
 	}
 }
 
@@ -1181,6 +1355,9 @@ type SamlSettings struct {
 	IdpDescriptorUrl            *string
 	AssertionConsumerServiceURL *string
 
+	ScopingIDPProviderId *string
+	ScopingIDPName       *string
+
 	IdpCertificateFile    *string
 	PublicCertificateFile *string
 	PrivateKeyFile        *string
@@ -1195,6 +1372,10 @@ type SamlSettings struct {
 	PositionAttribute  *string
 
 	LoginButtonText *string
+
+	LoginButtonColor       *string
+	LoginButtonBorderColor *string
+	LoginButtonTextColor   *string
 }
 
 func (s *SamlSettings) SetDefaults() {
@@ -1238,6 +1419,14 @@ func (s *SamlSettings) SetDefaults() {
 		s.AssertionConsumerServiceURL = NewString("")
 	}
 
+	if s.ScopingIDPProviderId == nil {
+		s.ScopingIDPProviderId = NewString("")
+	}
+
+	if s.ScopingIDPName == nil {
+		s.ScopingIDPName = NewString("")
+	}
+
 	if s.LoginButtonText == nil || *s.LoginButtonText == "" {
 		s.LoginButtonText = NewString(USER_AUTH_SERVICE_SAML_TEXT)
 	}
@@ -1268,6 +1457,18 @@ func (s *SamlSettings) SetDefaults() {
 
 	if s.LocaleAttribute == nil {
 		s.LocaleAttribute = NewString(SAML_SETTINGS_DEFAULT_LOCALE_ATTRIBUTE)
+	}
+
+	if s.LoginButtonColor == nil {
+		s.LoginButtonColor = NewString("#34a28b")
+	}
+
+	if s.LoginButtonBorderColor == nil {
+		s.LoginButtonBorderColor = NewString("#2389D7")
+	}
+
+	if s.LoginButtonTextColor == nil {
+		s.LoginButtonTextColor = NewString("#ffffff")
 	}
 }
 
@@ -1461,11 +1662,12 @@ type PluginState struct {
 }
 
 type PluginSettings struct {
-	Enable        *bool
-	EnableUploads *bool
-	Directory     *string
-	Plugins       map[string]interface{}
-	PluginStates  map[string]*PluginState
+	Enable          *bool
+	EnableUploads   *bool
+	Directory       *string
+	ClientDirectory *string
+	Plugins         map[string]interface{}
+	PluginStates    map[string]*PluginState
 }
 
 func (s *PluginSettings) SetDefaults() {
@@ -1485,12 +1687,114 @@ func (s *PluginSettings) SetDefaults() {
 		*s.Directory = PLUGIN_SETTINGS_DEFAULT_DIRECTORY
 	}
 
+	if s.ClientDirectory == nil {
+		s.ClientDirectory = NewString(PLUGIN_SETTINGS_DEFAULT_CLIENT_DIRECTORY)
+	}
+
+	if *s.ClientDirectory == "" {
+		*s.ClientDirectory = PLUGIN_SETTINGS_DEFAULT_CLIENT_DIRECTORY
+	}
+
 	if s.Plugins == nil {
 		s.Plugins = make(map[string]interface{})
 	}
 
 	if s.PluginStates == nil {
 		s.PluginStates = make(map[string]*PluginState)
+	}
+}
+
+type GlobalRelayMessageExportSettings struct {
+	CustomerType *string // must be either A9 or A10, dictates SMTP server url
+	SmtpUsername *string
+	SmtpPassword *string
+	EmailAddress *string // the address to send messages to
+}
+
+func (s *GlobalRelayMessageExportSettings) SetDefaults() {
+	if s.CustomerType == nil {
+		s.CustomerType = NewString(GLOBALRELAY_CUSTOMER_TYPE_A9)
+	}
+	if s.SmtpUsername == nil {
+		s.SmtpUsername = NewString("")
+	}
+	if s.SmtpPassword == nil {
+		s.SmtpPassword = NewString("")
+	}
+	if s.EmailAddress == nil {
+		s.EmailAddress = NewString("")
+	}
+}
+
+type MessageExportSettings struct {
+	EnableExport        *bool
+	ExportFormat        *string
+	DailyRunTime        *string
+	ExportFromTimestamp *int64
+	BatchSize           *int
+
+	// formatter-specific settings - these are only expected to be non-nil if ExportFormat is set to the associated format
+	GlobalRelaySettings *GlobalRelayMessageExportSettings
+}
+
+func (s *MessageExportSettings) SetDefaults() {
+	if s.EnableExport == nil {
+		s.EnableExport = NewBool(false)
+	}
+
+	if s.ExportFormat == nil {
+		s.ExportFormat = NewString(COMPLIANCE_EXPORT_TYPE_ACTIANCE)
+	}
+
+	if s.DailyRunTime == nil {
+		s.DailyRunTime = NewString("01:00")
+	}
+
+	if s.ExportFromTimestamp == nil {
+		s.ExportFromTimestamp = NewInt64(0)
+	}
+
+	if s.EnableExport != nil && *s.EnableExport && *s.ExportFromTimestamp == int64(0) {
+		// when the feature is enabled via the System Console, use the current timestamp as the start time for future exports
+		s.ExportFromTimestamp = NewInt64(GetMillis())
+	} else if s.EnableExport != nil && !*s.EnableExport {
+		// when the feature is disabled, reset the timestamp so that the timestamp will be set if the feature is re-enabled
+		s.ExportFromTimestamp = NewInt64(0)
+	}
+
+	if s.BatchSize == nil {
+		s.BatchSize = NewInt(10000)
+	}
+
+	if s.GlobalRelaySettings == nil {
+		s.GlobalRelaySettings = &GlobalRelayMessageExportSettings{}
+	}
+	s.GlobalRelaySettings.SetDefaults()
+}
+
+type DisplaySettings struct {
+	CustomUrlSchemes     *[]string
+	ExperimentalTimezone *bool
+}
+
+func (s *DisplaySettings) SetDefaults() {
+	if s.CustomUrlSchemes == nil {
+		customUrlSchemes := []string{}
+		s.CustomUrlSchemes = &customUrlSchemes
+	}
+
+	if s.ExperimentalTimezone == nil {
+		s.ExperimentalTimezone = NewBool(false)
+	}
+}
+
+type TimezoneSettings struct {
+	SupportedTimezonesPath *string
+}
+
+func (s *TimezoneSettings) SetDefaults() {
+	if s.SupportedTimezonesPath == nil {
+		s.SupportedTimezonesPath = NewString(TIMEZONE_SETTINGS_DEFAULT_SUPPORTED_TIMEZONES_PATH)
 	}
 }
 
@@ -1524,8 +1828,11 @@ type Config struct {
 	WebrtcSettings        WebrtcSettings
 	ElasticsearchSettings ElasticsearchSettings
 	DataRetentionSettings DataRetentionSettings
+	MessageExportSettings MessageExportSettings
 	JobSettings           JobSettings
 	PluginSettings        PluginSettings
+	DisplaySettings       DisplaySettings
+	TimezoneSettings      TimezoneSettings
 }
 
 func (o *Config) Clone() *Config {
@@ -1537,12 +1844,8 @@ func (o *Config) Clone() *Config {
 }
 
 func (o *Config) ToJson() string {
-	b, err := json.Marshal(o)
-	if err != nil {
-		return ""
-	} else {
-		return string(b)
-	}
+	b, _ := json.Marshal(o)
+	return string(b)
 }
 
 func (o *Config) GetSSOService(service string) *SSOSettings {
@@ -1559,14 +1862,9 @@ func (o *Config) GetSSOService(service string) *SSOSettings {
 }
 
 func ConfigFromJson(data io.Reader) *Config {
-	decoder := json.NewDecoder(data)
-	var o Config
-	err := decoder.Decode(&o)
-	if err == nil {
-		return &o
-	} else {
-		return nil
-	}
+	var o *Config
+	json.NewDecoder(data).Decode(&o)
+	return o
 }
 
 func (o *Config) SetDefaults() {
@@ -1603,6 +1901,9 @@ func (o *Config) SetDefaults() {
 	o.LogSettings.SetDefaults()
 	o.JobSettings.SetDefaults()
 	o.WebrtcSettings.SetDefaults()
+	o.MessageExportSettings.SetDefaults()
+	o.TimezoneSettings.SetDefaults()
+	o.DisplaySettings.SetDefaults()
 }
 
 func (o *Config) IsValid() *AppError {
@@ -1612,6 +1913,10 @@ func (o *Config) IsValid() *AppError {
 
 	if *o.ClusterSettings.Enable && *o.EmailSettings.EnableEmailBatching {
 		return NewAppError("Config.IsValid", "model.config.is_valid.cluster_email_batching.app_error", nil, "", http.StatusBadRequest)
+	}
+
+	if len(*o.ServiceSettings.SiteURL) == 0 && *o.ServiceSettings.AllowCookiesForSubdomains {
+		return NewAppError("Config.IsValid", "Allowing cookies for subdomains requires SiteURL to be set.", nil, "", http.StatusBadRequest)
 	}
 
 	if err := o.TeamSettings.isValid(); err != nil {
@@ -1663,6 +1968,14 @@ func (o *Config) IsValid() *AppError {
 	}
 
 	if err := o.LocalizationSettings.isValid(); err != nil {
+		return err
+	}
+
+	if err := o.MessageExportSettings.isValid(o.FileSettings); err != nil {
+		return err
+	}
+
+	if err := o.DisplaySettings.isValid(); err != nil {
 		return err
 	}
 
@@ -1814,6 +2127,10 @@ func (ls *LdapSettings) isValid() *AppError {
 		if *ls.IdAttribute == "" {
 			return NewAppError("Config.IsValid", "model.config.is_valid.ldap_id", nil, "", http.StatusBadRequest)
 		}
+
+		if *ls.LoginIdAttribute == "" {
+			return NewAppError("Config.IsValid", "model.config.is_valid.ldap_login_id", nil, "", http.StatusBadRequest)
+		}
 	}
 
 	return nil
@@ -1917,8 +2234,30 @@ func (ss *ServiceSettings) isValid() *AppError {
 		}
 	}
 
+	if len(*ss.WebsocketURL) != 0 {
+		if _, err := url.ParseRequestURI(*ss.WebsocketURL); err != nil {
+			return NewAppError("Config.IsValid", "model.config.is_valid.websocket_url.app_error", nil, "", http.StatusBadRequest)
+		}
+	}
+
 	if len(*ss.ListenAddress) == 0 {
 		return NewAppError("Config.IsValid", "model.config.is_valid.listen_address.app_error", nil, "", http.StatusBadRequest)
+	}
+
+	if *ss.ExperimentalGroupUnreadChannels != GROUP_UNREAD_CHANNELS_DISABLED &&
+		*ss.ExperimentalGroupUnreadChannels != GROUP_UNREAD_CHANNELS_DEFAULT_ON &&
+		*ss.ExperimentalGroupUnreadChannels != GROUP_UNREAD_CHANNELS_DEFAULT_OFF {
+		return NewAppError("Config.IsValid", "model.config.is_valid.group_unread_channels.app_error", nil, "", http.StatusBadRequest)
+	}
+
+	switch *ss.ImageProxyType {
+	case "":
+	case "atmos/camo":
+		if *ss.ImageProxyOptions == "" {
+			return NewAppError("Config.IsValid", "model.config.is_valid.atmos_camo_image_proxy_options.app_error", nil, "", http.StatusBadRequest)
+		}
+	default:
+		return NewAppError("Config.IsValid", "model.config.is_valid.image_proxy_type.app_error", nil, "", http.StatusBadRequest)
 	}
 
 	return nil
@@ -1978,6 +2317,62 @@ func (ls *LocalizationSettings) isValid() *AppError {
 	if len(*ls.AvailableLocales) > 0 {
 		if !strings.Contains(*ls.AvailableLocales, *ls.DefaultClientLocale) {
 			return NewAppError("Config.IsValid", "model.config.is_valid.localization.available_locales.app_error", nil, "", http.StatusBadRequest)
+		}
+	}
+
+	return nil
+}
+
+func (mes *MessageExportSettings) isValid(fs FileSettings) *AppError {
+	if mes.EnableExport == nil {
+		return NewAppError("Config.IsValid", "model.config.is_valid.message_export.enable.app_error", nil, "", http.StatusBadRequest)
+	}
+	if *mes.EnableExport {
+		if mes.ExportFromTimestamp == nil || *mes.ExportFromTimestamp < 0 || *mes.ExportFromTimestamp > GetMillis() {
+			return NewAppError("Config.IsValid", "model.config.is_valid.message_export.export_from.app_error", nil, "", http.StatusBadRequest)
+		} else if mes.DailyRunTime == nil {
+			return NewAppError("Config.IsValid", "model.config.is_valid.message_export.daily_runtime.app_error", nil, "", http.StatusBadRequest)
+		} else if _, err := time.Parse("15:04", *mes.DailyRunTime); err != nil {
+			return NewAppError("Config.IsValid", "model.config.is_valid.message_export.daily_runtime.app_error", nil, err.Error(), http.StatusBadRequest)
+		} else if mes.BatchSize == nil || *mes.BatchSize < 0 {
+			return NewAppError("Config.IsValid", "model.config.is_valid.message_export.batch_size.app_error", nil, "", http.StatusBadRequest)
+		} else if mes.ExportFormat == nil || (*mes.ExportFormat != COMPLIANCE_EXPORT_TYPE_ACTIANCE && *mes.ExportFormat != COMPLIANCE_EXPORT_TYPE_GLOBALRELAY) {
+			return NewAppError("Config.IsValid", "model.config.is_valid.message_export.export_type.app_error", nil, "", http.StatusBadRequest)
+		}
+
+		if *mes.ExportFormat == COMPLIANCE_EXPORT_TYPE_GLOBALRELAY {
+			if mes.GlobalRelaySettings == nil {
+				return NewAppError("Config.IsValid", "model.config.is_valid.message_export.global_relay.config_missing.app_error", nil, "", http.StatusBadRequest)
+			} else if mes.GlobalRelaySettings.CustomerType == nil || (*mes.GlobalRelaySettings.CustomerType != GLOBALRELAY_CUSTOMER_TYPE_A9 && *mes.GlobalRelaySettings.CustomerType != GLOBALRELAY_CUSTOMER_TYPE_A10) {
+				return NewAppError("Config.IsValid", "model.config.is_valid.message_export.global_relay.customer_type.app_error", nil, "", http.StatusBadRequest)
+			} else if mes.GlobalRelaySettings.EmailAddress == nil || !strings.Contains(*mes.GlobalRelaySettings.EmailAddress, "@") {
+				// validating email addresses is hard - just make sure it contains an '@' sign
+				// see https://stackoverflow.com/questions/201323/using-a-regular-expression-to-validate-an-email-address
+				return NewAppError("Config.IsValid", "model.config.is_valid.message_export.global_relay.email_address.app_error", nil, "", http.StatusBadRequest)
+			} else if mes.GlobalRelaySettings.SmtpUsername == nil || *mes.GlobalRelaySettings.SmtpUsername == "" {
+				return NewAppError("Config.IsValid", "model.config.is_valid.message_export.global_relay.smtp_username.app_error", nil, "", http.StatusBadRequest)
+			} else if mes.GlobalRelaySettings.SmtpPassword == nil || *mes.GlobalRelaySettings.SmtpPassword == "" {
+				return NewAppError("Config.IsValid", "model.config.is_valid.message_export.global_relay.smtp_password.app_error", nil, "", http.StatusBadRequest)
+			}
+		}
+	}
+	return nil
+}
+
+func (ds *DisplaySettings) isValid() *AppError {
+	if len(*ds.CustomUrlSchemes) != 0 {
+		validProtocolPattern := regexp.MustCompile(`(?i)^\s*[a-z][a-z0-9+.-]*\s*$`)
+
+		for _, scheme := range *ds.CustomUrlSchemes {
+			if !validProtocolPattern.MatchString(scheme) {
+				return NewAppError(
+					"Config.IsValid",
+					"model.config.is_valid.display.custom_url_schemes.app_error",
+					map[string]interface{}{"Protocol": scheme},
+					"",
+					http.StatusBadRequest,
+				)
+			}
 		}
 	}
 

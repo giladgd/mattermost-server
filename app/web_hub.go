@@ -13,10 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	l4g "github.com/alecthomas/log4go"
-
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 const (
@@ -30,7 +28,6 @@ type Hub struct {
 	// See https://github.com/mattermost/mattermost-server/pull/7281
 	connectionCount int64
 	app             *App
-	connections     []*WebConn
 	connectionIndex int
 	register        chan *WebConn
 	unregister      chan *WebConn
@@ -47,7 +44,6 @@ func (a *App) NewWebHub() *Hub {
 		app:            a,
 		register:       make(chan *WebConn, 1),
 		unregister:     make(chan *WebConn, 1),
-		connections:    make([]*WebConn, 0, model.SESSION_CACHE_SIZE),
 		broadcast:      make(chan *model.WebSocketEvent, BROADCAST_QUEUE_SIZE),
 		stop:           make(chan struct{}),
 		didStop:        make(chan struct{}),
@@ -68,7 +64,7 @@ func (a *App) TotalWebsocketConnections() int {
 func (a *App) HubStart() {
 	// Total number of hubs is twice the number of CPUs.
 	numberOfHubs := runtime.NumCPU() * 2
-	l4g.Info(utils.T("api.web_hub.start.starting.debug"), numberOfHubs)
+	mlog.Info(fmt.Sprintf("Starting %v websocket hubs", numberOfHubs))
 
 	a.Hubs = make([]*Hub, numberOfHubs)
 	a.HubsStopCheckingForDeadlock = make(chan bool, 1)
@@ -91,7 +87,7 @@ func (a *App) HubStart() {
 			case <-ticker.C:
 				for _, hub := range a.Hubs {
 					if len(hub.broadcast) >= DEADLOCK_WARN {
-						l4g.Error("Hub processing might be deadlock on hub %v goroutine %v with %v events in the buffer", hub.connectionIndex, hub.goroutineId, len(hub.broadcast))
+						mlog.Error(fmt.Sprintf("Hub processing might be deadlock on hub %v goroutine %v with %v events in the buffer", hub.connectionIndex, hub.goroutineId, len(hub.broadcast)))
 						buf := make([]byte, 1<<16)
 						runtime.Stack(buf, true)
 						output := fmt.Sprintf("%s", buf)
@@ -99,7 +95,7 @@ func (a *App) HubStart() {
 
 						for _, part := range splits {
 							if strings.Contains(part, fmt.Sprintf("%v", hub.goroutineId)) {
-								l4g.Error("Trace for possible deadlock goroutine %v", part)
+								mlog.Error(fmt.Sprintf("Trace for possible deadlock goroutine %v", part))
 							}
 						}
 					}
@@ -113,12 +109,12 @@ func (a *App) HubStart() {
 }
 
 func (a *App) HubStop() {
-	l4g.Info(utils.T("api.web_hub.start.stopping.debug"))
+	mlog.Info("stopping websocket hub connections")
 
 	select {
 	case a.HubsStopCheckingForDeadlock <- true:
 	default:
-		l4g.Warn("We appear to have already sent the stop checking for deadlocks command")
+		mlog.Warn("We appear to have already sent the stop checking for deadlocks command")
 	}
 
 	for _, hub := range a.Hubs {
@@ -129,6 +125,10 @@ func (a *App) HubStop() {
 }
 
 func (a *App) GetHubForUserId(userId string) *Hub {
+	if len(a.Hubs) == 0 {
+		return nil
+	}
+
 	hash := fnv.New32a()
 	hash.Write([]byte(userId))
 	index := hash.Sum32() % uint32(len(a.Hubs))
@@ -136,11 +136,17 @@ func (a *App) GetHubForUserId(userId string) *Hub {
 }
 
 func (a *App) HubRegister(webConn *WebConn) {
-	a.GetHubForUserId(webConn.UserId).Register(webConn)
+	hub := a.GetHubForUserId(webConn.UserId)
+	if hub != nil {
+		hub.Register(webConn)
+	}
 }
 
 func (a *App) HubUnregister(webConn *WebConn) {
-	a.GetHubForUserId(webConn.UserId).Unregister(webConn)
+	hub := a.GetHubForUserId(webConn.UserId)
+	if hub != nil {
+		hub.Unregister(webConn)
+	}
 }
 
 func (a *App) Publish(message *model.WebSocketEvent) {
@@ -170,8 +176,15 @@ func (a *App) Publish(message *model.WebSocketEvent) {
 }
 
 func (a *App) PublishSkipClusterSend(message *model.WebSocketEvent) {
-	for _, hub := range a.Hubs {
-		hub.Broadcast(message)
+	if message.Broadcast.UserId != "" {
+		hub := a.GetHubForUserId(message.Broadcast.UserId)
+		if hub != nil {
+			hub.Broadcast(message)
+		}
+	} else {
+		for _, hub := range a.Hubs {
+			hub.Broadcast(message)
+		}
 	}
 }
 
@@ -287,8 +300,9 @@ func (a *App) InvalidateCacheForUserSkipClusterSend(userId string) {
 	a.Srv.Store.User().InvalidateProfilesInChannelCacheByUser(userId)
 	a.Srv.Store.User().InvalidatProfileCacheForUser(userId)
 
-	if len(a.Hubs) != 0 {
-		a.GetHubForUserId(userId).InvalidateUser(userId)
+	hub := a.GetHubForUserId(userId)
+	if hub != nil {
+		hub.InvalidateUser(userId)
 	}
 }
 
@@ -310,8 +324,9 @@ func (a *App) InvalidateCacheForWebhookSkipClusterSend(webhookId string) {
 }
 
 func (a *App) InvalidateWebConnSessionCacheForUser(userId string) {
-	if len(a.Hubs) != 0 {
-		a.GetHubForUserId(userId).InvalidateUser(userId)
+	hub := a.GetHubForUserId(userId)
+	if hub != nil {
+		hub.InvalidateUser(userId)
 	}
 }
 
@@ -331,7 +346,7 @@ func (h *Hub) Unregister(webConn *WebConn) {
 }
 
 func (h *Hub) Broadcast(message *model.WebSocketEvent) {
-	if message != nil {
+	if h != nil && h.broadcast != nil && message != nil {
 		h.broadcast <- message
 	}
 }
@@ -362,80 +377,54 @@ func (h *Hub) Start() {
 	var doRecover func()
 
 	doStart = func() {
-
 		h.goroutineId = getGoroutineId()
-		l4g.Debug("Hub for index %v is starting with goroutine %v", h.connectionIndex, h.goroutineId)
+		mlog.Debug(fmt.Sprintf("Hub for index %v is starting with goroutine %v", h.connectionIndex, h.goroutineId))
+
+		connections := newHubConnectionIndex()
 
 		for {
 			select {
 			case webCon := <-h.register:
-				h.connections = append(h.connections, webCon)
-				atomic.StoreInt64(&h.connectionCount, int64(len(h.connections)))
-
+				connections.Add(webCon)
+				atomic.StoreInt64(&h.connectionCount, int64(len(connections.All())))
 			case webCon := <-h.unregister:
-				userId := webCon.UserId
+				connections.Remove(webCon)
+				atomic.StoreInt64(&h.connectionCount, int64(len(connections.All())))
 
-				found := false
-				indexToDel := -1
-				for i, webConCandidate := range h.connections {
-					if webConCandidate == webCon {
-						indexToDel = i
-						continue
-					}
-					if userId == webConCandidate.UserId {
-						found = true
-						if indexToDel != -1 {
-							break
-						}
-					}
-				}
-
-				if indexToDel != -1 {
-					// Delete the webcon we are unregistering
-					h.connections[indexToDel] = h.connections[len(h.connections)-1]
-					h.connections = h.connections[:len(h.connections)-1]
-				}
-
-				if len(userId) == 0 {
+				if len(webCon.UserId) == 0 {
 					continue
 				}
 
-				if !found {
+				if len(connections.ForUser(webCon.UserId)) == 0 {
 					h.app.Go(func() {
-						h.app.SetStatusOffline(userId, false)
+						h.app.SetStatusOffline(webCon.UserId, false)
 					})
 				}
-
 			case userId := <-h.invalidateUser:
-				for _, webCon := range h.connections {
-					if webCon.UserId == userId {
-						webCon.InvalidateCache()
-					}
+				for _, webCon := range connections.ForUser(userId) {
+					webCon.InvalidateCache()
 				}
-
 			case msg := <-h.broadcast:
-				for _, webCon := range h.connections {
+				candidates := connections.All()
+				if msg.Broadcast.UserId != "" {
+					candidates = connections.ForUser(msg.Broadcast.UserId)
+				}
+				msg.PrecomputeJSON()
+				for _, webCon := range candidates {
 					if webCon.ShouldSendEvent(msg) {
 						select {
 						case webCon.Send <- msg:
 						default:
-							l4g.Error(fmt.Sprintf("webhub.broadcast: cannot send, closing websocket for userId=%v", webCon.UserId))
+							mlog.Error(fmt.Sprintf("webhub.broadcast: cannot send, closing websocket for userId=%v", webCon.UserId))
 							close(webCon.Send)
-							for i, webConCandidate := range h.connections {
-								if webConCandidate == webCon {
-									h.connections[i] = h.connections[len(h.connections)-1]
-									h.connections = h.connections[:len(h.connections)-1]
-									break
-								}
-							}
+							connections.Remove(webCon)
 						}
 					}
 				}
-
 			case <-h.stop:
 				userIds := make(map[string]bool)
 
-				for _, webCon := range h.connections {
+				for _, webCon := range connections.All() {
 					userIds[webCon.UserId] = true
 					webCon.Close()
 				}
@@ -444,7 +433,6 @@ func (h *Hub) Start() {
 					h.app.SetStatusOffline(userId, false)
 				}
 
-				h.connections = make([]*WebConn, 0, model.SESSION_CACHE_SIZE)
 				h.ExplicitStop = true
 				close(h.didStop)
 
@@ -461,16 +449,73 @@ func (h *Hub) Start() {
 	doRecover = func() {
 		if !h.ExplicitStop {
 			if r := recover(); r != nil {
-				l4g.Error(fmt.Sprintf("Recovering from Hub panic. Panic was: %v", r))
+				mlog.Error(fmt.Sprintf("Recovering from Hub panic. Panic was: %v", r))
 			} else {
-				l4g.Error("Webhub stopped unexpectedly. Recovering.")
+				mlog.Error("Webhub stopped unexpectedly. Recovering.")
 			}
 
-			l4g.Error(string(debug.Stack()))
+			mlog.Error(string(debug.Stack()))
 
 			go doRecoverableStart()
 		}
 	}
 
 	go doRecoverableStart()
+}
+
+type hubConnectionIndexIndexes struct {
+	connections         int
+	connectionsByUserId int
+}
+
+// hubConnectionIndex provides fast addition, removal, and iteration of web connections.
+type hubConnectionIndex struct {
+	connections         []*WebConn
+	connectionsByUserId map[string][]*WebConn
+	connectionIndexes   map[*WebConn]*hubConnectionIndexIndexes
+}
+
+func newHubConnectionIndex() *hubConnectionIndex {
+	return &hubConnectionIndex{
+		connections:         make([]*WebConn, 0, model.SESSION_CACHE_SIZE),
+		connectionsByUserId: make(map[string][]*WebConn),
+		connectionIndexes:   make(map[*WebConn]*hubConnectionIndexIndexes),
+	}
+}
+
+func (i *hubConnectionIndex) Add(wc *WebConn) {
+	i.connections = append(i.connections, wc)
+	i.connectionsByUserId[wc.UserId] = append(i.connectionsByUserId[wc.UserId], wc)
+	i.connectionIndexes[wc] = &hubConnectionIndexIndexes{
+		connections:         len(i.connections) - 1,
+		connectionsByUserId: len(i.connectionsByUserId[wc.UserId]) - 1,
+	}
+}
+
+func (i *hubConnectionIndex) Remove(wc *WebConn) {
+	indexes, ok := i.connectionIndexes[wc]
+	if !ok {
+		return
+	}
+
+	last := i.connections[len(i.connections)-1]
+	i.connections[indexes.connections] = last
+	i.connections = i.connections[:len(i.connections)-1]
+	i.connectionIndexes[last].connections = indexes.connections
+
+	userConnections := i.connectionsByUserId[wc.UserId]
+	last = userConnections[len(userConnections)-1]
+	userConnections[indexes.connectionsByUserId] = last
+	i.connectionsByUserId[wc.UserId] = userConnections[:len(userConnections)-1]
+	i.connectionIndexes[last].connectionsByUserId = indexes.connectionsByUserId
+
+	delete(i.connectionIndexes, wc)
+}
+
+func (i *hubConnectionIndex) ForUser(id string) []*WebConn {
+	return i.connectionsByUserId[id]
+}
+
+func (i *hubConnectionIndex) All() []*WebConn {
+	return i.connections
 }

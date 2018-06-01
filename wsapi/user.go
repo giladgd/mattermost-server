@@ -4,14 +4,10 @@
 package wsapi
 
 import (
-	l4g "github.com/alecthomas/log4go"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 func (api *API) InitUser() {
-	l4g.Debug(utils.T("wsapi.user.init.debug"))
-
 	api.Router.Handle("user_typing", api.ApiWebSocketHandler(api.userTyping))
 }
 
@@ -33,7 +29,7 @@ func (api *API) userTyping(req *model.WebSocketRequest) (map[string]interface{},
 	event := model.NewWebSocketEvent(model.WEBSOCKET_EVENT_TYPING, "", channelId, "", omitUsers)
 	event.Add("parent_id", parentId)
 	event.Add("user_id", req.Session.UserId)
-	go api.App.Publish(event)
+	api.App.Publish(event)
 
 	return nil, nil
 }

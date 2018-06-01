@@ -11,6 +11,8 @@ import (
 	"net/rpc"
 	"reflect"
 
+	"github.com/mattermost/mattermost-server/mlog"
+	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/plugin"
 )
 
@@ -125,6 +127,66 @@ func (h *LocalHooks) ServeHTTP(args ServeHTTPArgs, reply *struct{}) error {
 	return nil
 }
 
+type HooksExecuteCommandReply struct {
+	Response *model.CommandResponse
+	Error    *model.AppError
+}
+
+func (h *LocalHooks) ExecuteCommand(args *model.CommandArgs, reply *HooksExecuteCommandReply) error {
+	if hook, ok := h.hooks.(interface {
+		ExecuteCommand(*model.CommandArgs) (*model.CommandResponse, *model.AppError)
+	}); ok {
+		reply.Response, reply.Error = hook.ExecuteCommand(args)
+	}
+	return nil
+}
+
+type MessageWillBeReply struct {
+	Post            *model.Post
+	RejectionReason string
+}
+
+type MessageUpdatedArgs struct {
+	NewPost *model.Post
+	OldPost *model.Post
+}
+
+func (h *LocalHooks) MessageWillBePosted(args *model.Post, reply *MessageWillBeReply) error {
+	if hook, ok := h.hooks.(interface {
+		MessageWillBePosted(*model.Post) (*model.Post, string)
+	}); ok {
+		reply.Post, reply.RejectionReason = hook.MessageWillBePosted(args)
+	}
+	return nil
+}
+
+func (h *LocalHooks) MessageWillBeUpdated(args *MessageUpdatedArgs, reply *MessageWillBeReply) error {
+	if hook, ok := h.hooks.(interface {
+		MessageWillBeUpdated(*model.Post, *model.Post) (*model.Post, string)
+	}); ok {
+		reply.Post, reply.RejectionReason = hook.MessageWillBeUpdated(args.NewPost, args.OldPost)
+	}
+	return nil
+}
+
+func (h *LocalHooks) MessageHasBeenPosted(args *model.Post, reply *struct{}) error {
+	if hook, ok := h.hooks.(interface {
+		MessageHasBeenPosted(*model.Post)
+	}); ok {
+		hook.MessageHasBeenPosted(args)
+	}
+	return nil
+}
+
+func (h *LocalHooks) MessageHasBeenUpdated(args *MessageUpdatedArgs, reply *struct{}) error {
+	if hook, ok := h.hooks.(interface {
+		MessageHasBeenUpdated(*model.Post, *model.Post)
+	}); ok {
+		hook.MessageHasBeenUpdated(args.NewPost, args.OldPost)
+	}
+	return nil
+}
+
 func ServeHooks(hooks interface{}, conn io.ReadWriteCloser, muxer *Muxer) {
 	server := rpc.NewServer()
 	server.Register(&LocalHooks{
@@ -141,6 +203,11 @@ const (
 	remoteOnDeactivate          = 1
 	remoteServeHTTP             = 2
 	remoteOnConfigurationChange = 3
+	remoteExecuteCommand        = 4
+	remoteMessageWillBePosted   = 5
+	remoteMessageWillBeUpdated  = 6
+	remoteMessageHasBeenPosted  = 7
+	remoteMessageHasBeenUpdated = 8
 	maxRemoteHookCount          = iota
 )
 
@@ -149,6 +216,7 @@ type RemoteHooks struct {
 	muxer       *Muxer
 	apiCloser   io.Closer
 	implemented [maxRemoteHookCount]bool
+	pluginId    string
 }
 
 var _ plugin.Hooks = (*RemoteHooks)(nil)
@@ -221,7 +289,67 @@ func (h *RemoteHooks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Request:              forwardedRequest,
 		RequestBodyStream:    requestBodyStream,
 	}, nil); err != nil {
+		mlog.Error("Plugin failed to ServeHTTP", mlog.String("plugin_id", h.pluginId), mlog.Err(err))
 		http.Error(w, "500 internal server error", http.StatusInternalServerError)
+	}
+}
+
+func (h *RemoteHooks) ExecuteCommand(args *model.CommandArgs) (*model.CommandResponse, *model.AppError) {
+	if !h.implemented[remoteExecuteCommand] {
+		return nil, model.NewAppError("RemoteHooks.ExecuteCommand", "plugin.rpcplugin.invocation.error", nil, "err=ExecuteCommand hook not implemented", http.StatusInternalServerError)
+	}
+	var reply HooksExecuteCommandReply
+	if err := h.client.Call("LocalHooks.ExecuteCommand", args, &reply); err != nil {
+		return nil, model.NewAppError("RemoteHooks.ExecuteCommand", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.Response, reply.Error
+}
+
+func (h *RemoteHooks) MessageWillBePosted(args *model.Post) (*model.Post, string) {
+	if !h.implemented[remoteMessageWillBePosted] {
+		return args, ""
+	}
+	var reply MessageWillBeReply
+	if err := h.client.Call("LocalHooks.MessageWillBePosted", args, &reply); err != nil {
+		return nil, ""
+	}
+	return reply.Post, reply.RejectionReason
+}
+
+func (h *RemoteHooks) MessageWillBeUpdated(newPost, oldPost *model.Post) (*model.Post, string) {
+	if !h.implemented[remoteMessageWillBeUpdated] {
+		return newPost, ""
+	}
+	var reply MessageWillBeReply
+	args := &MessageUpdatedArgs{
+		NewPost: newPost,
+		OldPost: oldPost,
+	}
+	if err := h.client.Call("LocalHooks.MessageWillBeUpdated", args, &reply); err != nil {
+		return nil, ""
+	}
+	return reply.Post, reply.RejectionReason
+}
+
+func (h *RemoteHooks) MessageHasBeenPosted(args *model.Post) {
+	if !h.implemented[remoteMessageHasBeenPosted] {
+		return
+	}
+	if err := h.client.Call("LocalHooks.MessageHasBeenPosted", args, nil); err != nil {
+		return
+	}
+}
+
+func (h *RemoteHooks) MessageHasBeenUpdated(newPost, oldPost *model.Post) {
+	if !h.implemented[remoteMessageHasBeenUpdated] {
+		return
+	}
+	args := &MessageUpdatedArgs{
+		NewPost: newPost,
+		OldPost: oldPost,
+	}
+	if err := h.client.Call("LocalHooks.MessageHasBeenUpdated", args, nil); err != nil {
+		return
 	}
 }
 
@@ -233,10 +361,11 @@ func (h *RemoteHooks) Close() error {
 	return h.client.Close()
 }
 
-func ConnectHooks(conn io.ReadWriteCloser, muxer *Muxer) (*RemoteHooks, error) {
+func ConnectHooks(conn io.ReadWriteCloser, muxer *Muxer, pluginId string) (*RemoteHooks, error) {
 	remote := &RemoteHooks{
-		client: rpc.NewClient(conn),
-		muxer:  muxer,
+		client:   rpc.NewClient(conn),
+		muxer:    muxer,
+		pluginId: pluginId,
 	}
 	implemented, err := remote.Implemented()
 	if err != nil {
@@ -253,6 +382,16 @@ func ConnectHooks(conn io.ReadWriteCloser, muxer *Muxer) (*RemoteHooks, error) {
 			remote.implemented[remoteOnConfigurationChange] = true
 		case "ServeHTTP":
 			remote.implemented[remoteServeHTTP] = true
+		case "ExecuteCommand":
+			remote.implemented[remoteExecuteCommand] = true
+		case "MessageWillBePosted":
+			remote.implemented[remoteMessageWillBePosted] = true
+		case "MessageWillBeUpdated":
+			remote.implemented[remoteMessageWillBeUpdated] = true
+		case "MessageHasBeenPosted":
+			remote.implemented[remoteMessageHasBeenPosted] = true
+		case "MessageHasBeenUpdated":
+			remote.implemented[remoteMessageHasBeenUpdated] = true
 		}
 	}
 	return remote, nil

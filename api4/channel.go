@@ -6,28 +6,28 @@ package api4
 import (
 	"net/http"
 
-	l4g "github.com/alecthomas/log4go"
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 func (api *API) InitChannel() {
-	l4g.Debug(utils.T("api.channel.init.debug"))
-
 	api.BaseRoutes.Channels.Handle("", api.ApiSessionRequired(createChannel)).Methods("POST")
 	api.BaseRoutes.Channels.Handle("/direct", api.ApiSessionRequired(createDirectChannel)).Methods("POST")
 	api.BaseRoutes.Channels.Handle("/group", api.ApiSessionRequired(createGroupChannel)).Methods("POST")
 	api.BaseRoutes.Channels.Handle("/members/{user_id:[A-Za-z0-9]+}/view", api.ApiSessionRequired(viewChannel)).Methods("POST")
+	api.BaseRoutes.Channels.Handle("/{channel_id:[A-Za-z0-9]+}/scheme", api.ApiSessionRequired(updateChannelScheme)).Methods("PUT")
 
 	api.BaseRoutes.ChannelsForTeam.Handle("", api.ApiSessionRequired(getPublicChannelsForTeam)).Methods("GET")
 	api.BaseRoutes.ChannelsForTeam.Handle("/deleted", api.ApiSessionRequired(getDeletedChannelsForTeam)).Methods("GET")
 	api.BaseRoutes.ChannelsForTeam.Handle("/ids", api.ApiSessionRequired(getPublicChannelsByIdsForTeam)).Methods("POST")
 	api.BaseRoutes.ChannelsForTeam.Handle("/search", api.ApiSessionRequired(searchChannelsForTeam)).Methods("POST")
+	api.BaseRoutes.ChannelsForTeam.Handle("/autocomplete", api.ApiSessionRequired(autocompleteChannelsForTeam)).Methods("GET")
 	api.BaseRoutes.User.Handle("/teams/{team_id:[A-Za-z0-9]+}/channels", api.ApiSessionRequired(getChannelsForTeamForUser)).Methods("GET")
 
 	api.BaseRoutes.Channel.Handle("", api.ApiSessionRequired(getChannel)).Methods("GET")
 	api.BaseRoutes.Channel.Handle("", api.ApiSessionRequired(updateChannel)).Methods("PUT")
 	api.BaseRoutes.Channel.Handle("/patch", api.ApiSessionRequired(patchChannel)).Methods("PUT")
+	api.BaseRoutes.Channel.Handle("/convert", api.ApiSessionRequired(convertChannelToPrivate)).Methods("POST")
 	api.BaseRoutes.Channel.Handle("/restore", api.ApiSessionRequired(restoreChannel)).Methods("POST")
 	api.BaseRoutes.Channel.Handle("", api.ApiSessionRequired(deleteChannel)).Methods("DELETE")
 	api.BaseRoutes.Channel.Handle("/stats", api.ApiSessionRequired(getChannelStats)).Methods("GET")
@@ -139,11 +139,50 @@ func updateChannel(c *Context, w http.ResponseWriter, r *http.Request) {
 	} else {
 		if oldChannelDisplayName != channel.DisplayName {
 			if err := c.App.PostUpdateChannelDisplayNameMessage(c.Session.UserId, channel, oldChannelDisplayName, channel.DisplayName); err != nil {
-				l4g.Error(err.Error())
+				mlog.Error(err.Error())
 			}
 		}
+
 		c.LogAudit("name=" + channel.Name)
 		w.Write([]byte(oldChannel.ToJson()))
+	}
+}
+
+func convertChannelToPrivate(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireChannelId()
+	if c.Err != nil {
+		return
+	}
+
+	oldPublicChannel, err := c.App.GetChannel(c.Params.ChannelId)
+	if err != nil {
+		c.Err = err
+		return
+	} else if !c.App.SessionHasPermissionToTeam(c.Session, oldPublicChannel.TeamId, model.PERMISSION_MANAGE_TEAM) {
+		c.SetPermissionError(model.PERMISSION_MANAGE_TEAM)
+		return
+	} else if oldPublicChannel.Type == model.CHANNEL_PRIVATE {
+		c.Err = model.NewAppError("convertChannelToPrivate", "api.channel.convert_channel_to_private.private_channel_error", nil, "", http.StatusBadRequest)
+		return
+	} else if oldPublicChannel.Name == model.DEFAULT_CHANNEL {
+		c.Err = model.NewAppError("convertChannelToPrivate", "api.channel.convert_channel_to_private.default_channel_error", nil, "", http.StatusBadRequest)
+		return
+	}
+
+	var user *model.User
+	if user, err = c.App.GetUser(c.Session.UserId); err != nil {
+		c.Err = err
+		return
+	}
+
+	oldPublicChannel.Type = model.CHANNEL_PRIVATE
+
+	if rchannel, err := c.App.UpdateChannelPrivacy(oldPublicChannel, user); err != nil {
+		c.Err = err
+		return
+	} else {
+		c.LogAudit("name=" + rchannel.Name)
+		w.Write([]byte(rchannel.ToJson()))
 	}
 }
 
@@ -389,7 +428,7 @@ func getPinnedPosts(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	} else {
 		w.Header().Set(model.HEADER_ETAG_SERVER, posts.Etag())
-		w.Write([]byte(posts.ToJson()))
+		w.Write([]byte(c.App.PostListWithProxyAddedToImageURLs(posts).ToJson()))
 	}
 }
 
@@ -488,6 +527,27 @@ func getChannelsForTeamForUser(c *Context, w http.ResponseWriter, r *http.Reques
 		return
 	} else {
 		w.Header().Set(model.HEADER_ETAG_SERVER, channels.Etag())
+		w.Write([]byte(channels.ToJson()))
+	}
+}
+
+func autocompleteChannelsForTeam(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireTeamId()
+	if c.Err != nil {
+		return
+	}
+
+	if !c.App.SessionHasPermissionToTeam(c.Session, c.Params.TeamId, model.PERMISSION_LIST_TEAM_CHANNELS) {
+		c.SetPermissionError(model.PERMISSION_LIST_TEAM_CHANNELS)
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+
+	if channels, err := c.App.AutocompleteChannels(c.Params.TeamId, name); err != nil {
+		c.Err = err
+		return
+	} else {
 		w.Write([]byte(channels.ToJson()))
 	}
 }
@@ -715,7 +775,7 @@ func viewChannel(c *Context, w http.ResponseWriter, r *http.Request) {
 
 	c.App.UpdateLastActivityAtIfNeeded(c.Session)
 
-	// Returning {"status": "OK", ...} for backwards compatability
+	// Returning {"status": "OK", ...} for backwards compatibility
 	resp := &model.ChannelViewResponse{
 		Status:            "OK",
 		LastViewedAtTimes: times,
@@ -884,6 +944,56 @@ func removeChannelMember(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.LogAudit("name=" + channel.Name + " user_id=" + c.Params.UserId)
+
+	ReturnStatusOK(w)
+}
+
+func updateChannelScheme(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequireChannelId()
+	if c.Err != nil {
+		return
+	}
+
+	schemeID := model.SchemeIDFromJson(r.Body)
+	if schemeID == nil || len(*schemeID) != 26 {
+		c.SetInvalidParam("scheme_id")
+		return
+	}
+
+	if c.App.License() == nil {
+		c.Err = model.NewAppError("Api4.UpdateChannelScheme", "api.channel.update_channel_scheme.license.error", nil, "", http.StatusNotImplemented)
+		return
+	}
+
+	if !c.App.SessionHasPermissionToChannel(c.Session, c.Params.ChannelId, model.PERMISSION_MANAGE_SYSTEM) {
+		c.SetPermissionError(model.PERMISSION_MANAGE_SYSTEM)
+		return
+	}
+
+	scheme, err := c.App.GetScheme(*schemeID)
+	if err != nil {
+		c.Err = err
+		return
+	}
+
+	if scheme.Scope != model.SCHEME_SCOPE_CHANNEL {
+		c.Err = model.NewAppError("Api4.UpdateChannelScheme", "api.channel.update_channel_scheme.scheme_scope.error", nil, "", http.StatusBadRequest)
+		return
+	}
+
+	channel, err := c.App.GetChannel(c.Params.ChannelId)
+	if err != nil {
+		c.Err = err
+		return
+	}
+
+	channel.SchemeId = &scheme.Id
+
+	_, err = c.App.UpdateChannelScheme(channel)
+	if err != nil {
+		c.Err = err
+		return
+	}
 
 	ReturnStatusOK(w)
 }

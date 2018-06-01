@@ -17,7 +17,6 @@ import (
 
 	"github.com/mattermost/mattermost-server/app"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 func TestCreatePost(t *testing.T) {
@@ -117,6 +116,47 @@ func TestCreatePost(t *testing.T) {
 	}
 }
 
+func TestCreatePostEphemeral(t *testing.T) {
+	th := Setup().InitBasic().InitSystemAdmin()
+	defer th.TearDown()
+	Client := th.SystemAdminClient
+
+	ephemeralPost := &model.PostEphemeral{
+		UserID: th.BasicUser2.Id,
+		Post:   &model.Post{ChannelId: th.BasicChannel.Id, Message: "a" + model.NewId() + "a", Props: model.StringInterface{model.PROPS_ADD_CHANNEL_MEMBER: "no good"}},
+	}
+
+	rpost, resp := Client.CreatePostEphemeral(ephemeralPost)
+	CheckNoError(t, resp)
+	CheckCreatedStatus(t, resp)
+
+	if rpost.Message != ephemeralPost.Post.Message {
+		t.Fatal("message didn't match")
+	}
+
+	if rpost.EditAt != 0 {
+		t.Fatal("newly created ephemeral post shouldn't have EditAt set")
+	}
+
+	if r, err := Client.DoApiPost("/posts/ephemeral", "garbage"); err == nil {
+		t.Fatal("should have errored")
+	} else {
+		if r.StatusCode != http.StatusBadRequest {
+			t.Log("actual: " + strconv.Itoa(r.StatusCode))
+			t.Log("expected: " + strconv.Itoa(http.StatusBadRequest))
+			t.Fatal("wrong status code")
+		}
+	}
+
+	Client.Logout()
+	_, resp = Client.CreatePostEphemeral(ephemeralPost)
+	CheckUnauthorizedStatus(t, resp)
+
+	Client = th.Client
+	rpost, resp = Client.CreatePostEphemeral(ephemeralPost)
+	CheckForbiddenStatus(t, resp)
+}
+
 func testCreatePostWithOutgoingHook(
 	t *testing.T,
 	hookContentType, expectedContentType, message, triggerWord string,
@@ -130,20 +170,7 @@ func testCreatePostWithOutgoingHook(
 	team := th.BasicTeam
 	channel := th.BasicChannel
 
-	enableOutgoingHooks := th.App.Config().ServiceSettings.EnableOutgoingWebhooks
-	enableAdminOnlyHooks := th.App.Config().ServiceSettings.EnableOnlyAdminIntegrations
-	allowedInternalConnections := *th.App.Config().ServiceSettings.AllowedUntrustedInternalConnections
-	defer func() {
-		th.App.UpdateConfig(func(cfg *model.Config) { cfg.ServiceSettings.EnableOutgoingWebhooks = enableOutgoingHooks })
-		th.App.UpdateConfig(func(cfg *model.Config) { cfg.ServiceSettings.EnableOnlyAdminIntegrations = enableAdminOnlyHooks })
-		th.App.SetDefaultRolesBasedOnConfig()
-		th.App.UpdateConfig(func(cfg *model.Config) {
-			cfg.ServiceSettings.AllowedUntrustedInternalConnections = &allowedInternalConnections
-		})
-	}()
 	th.App.UpdateConfig(func(cfg *model.Config) { cfg.ServiceSettings.EnableOutgoingWebhooks = true })
-	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableOnlyAdminIntegrations = true })
-	th.App.SetDefaultRolesBasedOnConfig()
 	th.App.UpdateConfig(func(cfg *model.Config) {
 		*cfg.ServiceSettings.AllowedUntrustedInternalConnections = "localhost 127.0.0.1"
 	})
@@ -323,7 +350,7 @@ func TestCreatePostPublic(t *testing.T) {
 
 	post := &model.Post{ChannelId: th.BasicChannel.Id, Message: "#hashtag a" + model.NewId() + "a"}
 
-	user := model.User{Email: GenerateTestEmail(), Nickname: "Joram Wilander", Password: "hello1", Username: GenerateTestUsername(), Roles: model.SYSTEM_USER_ROLE_ID}
+	user := model.User{Email: th.GenerateTestEmail(), Nickname: "Joram Wilander", Password: "hello1", Username: GenerateTestUsername(), Roles: model.SYSTEM_USER_ROLE_ID}
 
 	ruser, resp := Client.CreateUser(&user)
 	CheckNoError(t, resp)
@@ -368,7 +395,7 @@ func TestCreatePostAll(t *testing.T) {
 
 	post := &model.Post{ChannelId: th.BasicChannel.Id, Message: "#hashtag a" + model.NewId() + "a"}
 
-	user := model.User{Email: GenerateTestEmail(), Nickname: "Joram Wilander", Password: "hello1", Username: GenerateTestUsername(), Roles: model.SYSTEM_USER_ROLE_ID}
+	user := model.User{Email: th.GenerateTestEmail(), Nickname: "Joram Wilander", Password: "hello1", Username: GenerateTestUsername(), Roles: model.SYSTEM_USER_ROLE_ID}
 
 	directChannel, _ := th.App.CreateDirectChannel(th.BasicUser.Id, th.BasicUser2.Id)
 
@@ -489,21 +516,7 @@ func TestUpdatePost(t *testing.T) {
 	Client := th.Client
 	channel := th.BasicChannel
 
-	isLicensed := utils.IsLicensed()
-	license := utils.License()
-	allowEditPost := *th.App.Config().ServiceSettings.AllowEditPost
-	defer func() {
-		utils.SetIsLicensed(isLicensed)
-		utils.SetLicense(license)
-		th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.AllowEditPost = allowEditPost })
-		th.App.SetDefaultRolesBasedOnConfig()
-	}()
-	utils.SetIsLicensed(true)
-	utils.SetLicense(&model.License{Features: &model.Features{}})
-	utils.License().Features.SetDefaults()
-
-	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.AllowEditPost = model.ALLOW_EDIT_POST_ALWAYS })
-	th.App.SetDefaultRolesBasedOnConfig()
+	th.App.SetLicense(model.NewTestLicense())
 
 	post := &model.Post{ChannelId: channel.Id, Message: "zz" + model.NewId() + "a"}
 	rpost, resp := Client.CreatePost(post)
@@ -574,21 +587,7 @@ func TestPatchPost(t *testing.T) {
 	Client := th.Client
 	channel := th.BasicChannel
 
-	isLicensed := utils.IsLicensed()
-	license := utils.License()
-	allowEditPost := *th.App.Config().ServiceSettings.AllowEditPost
-	defer func() {
-		utils.SetIsLicensed(isLicensed)
-		utils.SetLicense(license)
-		th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.AllowEditPost = allowEditPost })
-		th.App.SetDefaultRolesBasedOnConfig()
-	}()
-	utils.SetIsLicensed(true)
-	utils.SetLicense(&model.License{Features: &model.Features{}})
-	utils.License().Features.SetDefaults()
-
-	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.AllowEditPost = model.ALLOW_EDIT_POST_ALWAYS })
-	th.App.SetDefaultRolesBasedOnConfig()
+	th.App.SetLicense(model.NewTestLicense())
 
 	post := &model.Post{
 		ChannelId:    channel.Id,

@@ -4,12 +4,12 @@
 package api4
 
 import (
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
-	l4g "github.com/alecthomas/log4go"
 	"github.com/mattermost/mattermost-server/app"
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/utils"
@@ -44,8 +44,6 @@ var MEDIA_CONTENT_TYPES = [...]string{
 }
 
 func (api *API) InitFile() {
-	l4g.Debug(utils.T("api.file.init.debug"))
-
 	api.BaseRoutes.Files.Handle("", api.ApiSessionRequired(uploadFile)).Methods("POST")
 	api.BaseRoutes.File.Handle("", api.ApiSessionRequiredTrustRequester(getFile)).Methods("GET")
 	api.BaseRoutes.File.Handle("/thumbnail", api.ApiSessionRequiredTrustRequester(getFileThumbnail)).Methods("GET")
@@ -68,32 +66,62 @@ func uploadFile(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(*c.App.Config().FileSettings.MaxFileSize); err != nil {
+	var resStruct *model.FileUploadResponse
+	var appErr *model.AppError
+
+	if err := r.ParseMultipartForm(*c.App.Config().FileSettings.MaxFileSize); err != nil && err != http.ErrNotMultipart {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	} else if err == http.ErrNotMultipart {
+		defer r.Body.Close()
+
+		c.RequireChannelId()
+		c.RequireFilename()
+
+		if c.Err != nil {
+			return
+		}
+
+		channelId := c.Params.ChannelId
+		filename := c.Params.Filename
+
+		if !c.App.SessionHasPermissionToChannel(c.Session, channelId, model.PERMISSION_UPLOAD_FILE) {
+			c.SetPermissionError(model.PERMISSION_UPLOAD_FILE)
+			return
+		}
+
+		resStruct, appErr = c.App.UploadFiles(
+			FILE_TEAM_ID,
+			channelId,
+			c.Session.UserId,
+			[]io.ReadCloser{r.Body},
+			[]string{filename},
+			[]string{},
+		)
+	} else {
+		m := r.MultipartForm
+
+		props := m.Value
+		if len(props["channel_id"]) == 0 {
+			c.SetInvalidParam("channel_id")
+			return
+		}
+		channelId := props["channel_id"][0]
+		if len(channelId) == 0 {
+			c.SetInvalidParam("channel_id")
+			return
+		}
+
+		if !c.App.SessionHasPermissionToChannel(c.Session, channelId, model.PERMISSION_UPLOAD_FILE) {
+			c.SetPermissionError(model.PERMISSION_UPLOAD_FILE)
+			return
+		}
+
+		resStruct, appErr = c.App.UploadMultipartFiles(FILE_TEAM_ID, channelId, c.Session.UserId, m.File["files"], m.Value["client_ids"])
 	}
 
-	m := r.MultipartForm
-
-	props := m.Value
-	if len(props["channel_id"]) == 0 {
-		c.SetInvalidParam("channel_id")
-		return
-	}
-	channelId := props["channel_id"][0]
-	if len(channelId) == 0 {
-		c.SetInvalidParam("channel_id")
-		return
-	}
-
-	if !c.App.SessionHasPermissionToChannel(c.Session, channelId, model.PERMISSION_UPLOAD_FILE) {
-		c.SetPermissionError(model.PERMISSION_UPLOAD_FILE)
-		return
-	}
-
-	resStruct, err := c.App.UploadFiles(FILE_TEAM_ID, channelId, c.Session.UserId, m.File["files"], m.Value["client_ids"])
-	if err != nil {
-		c.Err = err
+	if appErr != nil {
+		c.Err = appErr
 		return
 	}
 
@@ -284,13 +312,13 @@ func getPublicFile(c *Context, w http.ResponseWriter, r *http.Request) {
 
 	if len(hash) == 0 {
 		c.Err = model.NewAppError("getPublicFile", "api.file.get_file.public_invalid.app_error", nil, "", http.StatusBadRequest)
-		http.Redirect(w, r, c.GetSiteURLHeader()+"/error?message="+utils.T(c.Err.Message), http.StatusTemporaryRedirect)
+		utils.RenderWebAppError(w, r, c.Err, c.App.AsymmetricSigningKey())
 		return
 	}
 
 	if hash != app.GeneratePublicLinkHash(info.Id, *c.App.Config().FileSettings.PublicLinkSalt) {
 		c.Err = model.NewAppError("getPublicFile", "api.file.get_file.public_invalid.app_error", nil, "", http.StatusBadRequest)
-		http.Redirect(w, r, c.GetSiteURLHeader()+"/error?message="+utils.T(c.Err.Message), http.StatusTemporaryRedirect)
+		utils.RenderWebAppError(w, r, c.Err, c.App.AsymmetricSigningKey())
 		return
 	}
 

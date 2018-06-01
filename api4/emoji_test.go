@@ -11,6 +11,8 @@ import (
 
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/utils"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCreateEmoji(t *testing.T) {
@@ -23,6 +25,11 @@ func TestCreateEmoji(t *testing.T) {
 		th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = EnableCustomEmoji })
 	}()
 	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = false })
+
+	defaultRolePermissions := th.SaveDefaultRolePermissions()
+	defer func() {
+		th.RestoreDefaultRolePermissions(defaultRolePermissions)
+	}()
 
 	emoji := &model.Emoji{
 		CreatorId: th.BasicUser.Id,
@@ -139,6 +146,28 @@ func TestCreateEmoji(t *testing.T) {
 
 	_, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
 	CheckForbiddenStatus(t, resp)
+
+	// try to create an emoji without permissions
+	th.RemovePermissionFromRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+
+	emoji = &model.Emoji{
+		CreatorId: th.BasicUser.Id,
+		Name:      model.NewId(),
+	}
+
+	_, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+	CheckForbiddenStatus(t, resp)
+
+	// create an emoji with permissions in one team
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.TEAM_USER_ROLE_ID)
+
+	emoji = &model.Emoji{
+		CreatorId: th.BasicUser.Id,
+		Name:      model.NewId(),
+	}
+
+	_, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+	CheckNoError(t, resp)
 }
 
 func TestGetEmojiList(t *testing.T) {
@@ -184,7 +213,7 @@ func TestGetEmojiList(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Fatalf("failed to get emoji with id %v", emoji.Id)
+			t.Fatalf("failed to get emoji with id %v, %v", emoji.Id, len(listEmoji))
 		}
 	}
 
@@ -209,6 +238,13 @@ func TestGetEmojiList(t *testing.T) {
 	if len(listEmoji) != 1 {
 		t.Fatal("should only return 1")
 	}
+
+	listEmoji, resp = Client.GetSortedEmojiList(0, 100, model.EMOJI_SORT_BY_NAME)
+	CheckNoError(t, resp)
+
+	if len(listEmoji) == 0 {
+		t.Fatal("should return more than 0")
+	}
 }
 
 func TestDeleteEmoji(t *testing.T) {
@@ -221,6 +257,11 @@ func TestDeleteEmoji(t *testing.T) {
 		th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = EnableCustomEmoji })
 	}()
 	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = true })
+
+	defaultRolePermissions := th.SaveDefaultRolePermissions()
+	defer func() {
+		th.RestoreDefaultRolePermissions(defaultRolePermissions)
+	}()
 
 	emoji := &model.Emoji{
 		CreatorId: th.BasicUser.Id,
@@ -268,14 +309,100 @@ func TestDeleteEmoji(t *testing.T) {
 	_, resp = Client.DeleteEmoji("")
 	CheckNotFoundStatus(t, resp)
 
-	//Try to delete other user's custom emoji
+	//Try to delete my custom emoji without permissions
+	newEmoji, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+	CheckNoError(t, resp)
+
+	th.RemovePermissionFromRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	_, resp = Client.DeleteEmoji(newEmoji.Id)
+	CheckForbiddenStatus(t, resp)
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+
+	//Try to delete other user's custom emoji without MANAGE_EMOJIS permissions
+	emoji = &model.Emoji{
+		CreatorId: th.BasicUser.Id,
+		Name:      model.NewId(),
+	}
+
+	newEmoji, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+	CheckNoError(t, resp)
+
+	th.RemovePermissionFromRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_OTHERS_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	Client.Logout()
+	th.LoginBasic2()
+	ok, resp = Client.DeleteEmoji(newEmoji.Id)
+	CheckForbiddenStatus(t, resp)
+	th.RemovePermissionFromRole(model.PERMISSION_MANAGE_OTHERS_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	Client.Logout()
+	th.LoginBasic()
+
+	//Try to delete other user's custom emoji without MANAGE_OTHERS_EMOJIS permissions
+	emoji = &model.Emoji{
+		CreatorId: th.BasicUser.Id,
+		Name:      model.NewId(),
+	}
+
 	newEmoji, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
 	CheckNoError(t, resp)
 
 	Client.Logout()
 	th.LoginBasic2()
 	ok, resp = Client.DeleteEmoji(newEmoji.Id)
-	CheckUnauthorizedStatus(t, resp)
+	CheckForbiddenStatus(t, resp)
+	Client.Logout()
+	th.LoginBasic()
+
+	//Try to delete other user's custom emoji with permissions
+	emoji = &model.Emoji{
+		CreatorId: th.BasicUser.Id,
+		Name:      model.NewId(),
+	}
+
+	newEmoji, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+	CheckNoError(t, resp)
+
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_OTHERS_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	Client.Logout()
+	th.LoginBasic2()
+	ok, resp = Client.DeleteEmoji(newEmoji.Id)
+	CheckNoError(t, resp)
+
+	Client.Logout()
+	th.LoginBasic()
+
+	//Try to delete my custom emoji with permissions at team level
+	newEmoji, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+	CheckNoError(t, resp)
+
+	th.RemovePermissionFromRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.TEAM_USER_ROLE_ID)
+	_, resp = Client.DeleteEmoji(newEmoji.Id)
+	CheckNoError(t, resp)
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	th.RemovePermissionFromRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.TEAM_USER_ROLE_ID)
+
+	//Try to delete other user's custom emoji with permissions at team level
+	emoji = &model.Emoji{
+		CreatorId: th.BasicUser.Id,
+		Name:      model.NewId(),
+	}
+
+	newEmoji, resp = Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+	CheckNoError(t, resp)
+
+	th.RemovePermissionFromRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+	th.RemovePermissionFromRole(model.PERMISSION_MANAGE_OTHERS_EMOJIS.Id, model.SYSTEM_USER_ROLE_ID)
+
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_EMOJIS.Id, model.TEAM_USER_ROLE_ID)
+	th.AddPermissionToRole(model.PERMISSION_MANAGE_OTHERS_EMOJIS.Id, model.TEAM_USER_ROLE_ID)
+
+	Client.Logout()
+	th.LoginBasic2()
+	ok, resp = Client.DeleteEmoji(newEmoji.Id)
+	CheckNoError(t, resp)
 }
 
 func TestGetEmoji(t *testing.T) {
@@ -305,6 +432,33 @@ func TestGetEmoji(t *testing.T) {
 
 	_, resp = Client.GetEmoji(model.NewId())
 	CheckNotFoundStatus(t, resp)
+}
+
+func TestGetEmojiByName(t *testing.T) {
+	th := Setup().InitBasic()
+	defer th.TearDown()
+	Client := th.Client
+
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = true })
+
+	emoji := &model.Emoji{
+		CreatorId: th.BasicUser.Id,
+		Name:      model.NewId(),
+	}
+
+	newEmoji, resp := Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+	CheckNoError(t, resp)
+
+	emoji, resp = Client.GetEmojiByName(newEmoji.Name)
+	CheckNoError(t, resp)
+	assert.Equal(t, newEmoji.Name, emoji.Name)
+
+	_, resp = Client.GetEmojiByName(model.NewId())
+	CheckNotFoundStatus(t, resp)
+
+	Client.Logout()
+	_, resp = Client.GetEmojiByName(newEmoji.Name)
+	CheckUnauthorizedStatus(t, resp)
 }
 
 func TestGetEmojiImage(t *testing.T) {
@@ -424,4 +578,136 @@ func TestGetEmojiImage(t *testing.T) {
 
 	_, resp = Client.GetEmojiImage("")
 	CheckBadRequestStatus(t, resp)
+}
+
+func TestSearchEmoji(t *testing.T) {
+	th := Setup().InitBasic()
+	defer th.TearDown()
+	Client := th.Client
+
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = true })
+
+	searchTerm1 := model.NewId()
+	searchTerm2 := model.NewId()
+
+	emojis := []*model.Emoji{
+		{
+			CreatorId: th.BasicUser.Id,
+			Name:      searchTerm1,
+		},
+		{
+			CreatorId: th.BasicUser.Id,
+			Name:      "blargh_" + searchTerm2,
+		},
+	}
+
+	for idx, emoji := range emojis {
+		emoji, resp := Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+		CheckNoError(t, resp)
+		emojis[idx] = emoji
+	}
+
+	search := &model.EmojiSearch{Term: searchTerm1}
+	remojis, resp := Client.SearchEmoji(search)
+	CheckNoError(t, resp)
+	CheckOKStatus(t, resp)
+
+	found := false
+	for _, e := range remojis {
+		if e.Name == emojis[0].Name {
+			found = true
+		}
+	}
+
+	assert.True(t, found)
+
+	search.Term = searchTerm2
+	search.PrefixOnly = true
+	remojis, resp = Client.SearchEmoji(search)
+	CheckNoError(t, resp)
+	CheckOKStatus(t, resp)
+
+	found = false
+	for _, e := range remojis {
+		if e.Name == emojis[1].Name {
+			found = true
+		}
+	}
+
+	assert.False(t, found)
+
+	search.PrefixOnly = false
+	remojis, resp = Client.SearchEmoji(search)
+	CheckNoError(t, resp)
+	CheckOKStatus(t, resp)
+
+	found = false
+	for _, e := range remojis {
+		if e.Name == emojis[1].Name {
+			found = true
+		}
+	}
+
+	assert.True(t, found)
+
+	search.Term = ""
+	_, resp = Client.SearchEmoji(search)
+	CheckBadRequestStatus(t, resp)
+
+	Client.Logout()
+	_, resp = Client.SearchEmoji(search)
+	CheckUnauthorizedStatus(t, resp)
+}
+
+func TestAutocompleteEmoji(t *testing.T) {
+	th := Setup().InitBasic()
+	defer th.TearDown()
+	Client := th.Client
+
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = true })
+
+	searchTerm1 := model.NewId()
+
+	emojis := []*model.Emoji{
+		{
+			CreatorId: th.BasicUser.Id,
+			Name:      searchTerm1,
+		},
+		{
+			CreatorId: th.BasicUser.Id,
+			Name:      "blargh_" + searchTerm1,
+		},
+	}
+
+	for idx, emoji := range emojis {
+		emoji, resp := Client.CreateEmoji(emoji, utils.CreateTestGif(t, 10, 10), "image.gif")
+		CheckNoError(t, resp)
+		emojis[idx] = emoji
+	}
+
+	remojis, resp := Client.AutocompleteEmoji(searchTerm1, "")
+	CheckNoError(t, resp)
+	CheckOKStatus(t, resp)
+
+	found1 := false
+	found2 := false
+	for _, e := range remojis {
+		if e.Name == emojis[0].Name {
+			found1 = true
+		}
+
+		if e.Name == emojis[1].Name {
+			found2 = true
+		}
+	}
+
+	assert.True(t, found1)
+	assert.False(t, found2)
+
+	_, resp = Client.AutocompleteEmoji("", "")
+	CheckBadRequestStatus(t, resp)
+
+	Client.Logout()
+	_, resp = Client.AutocompleteEmoji(searchTerm1, "")
+	CheckUnauthorizedStatus(t, resp)
 }

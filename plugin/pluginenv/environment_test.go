@@ -44,8 +44,8 @@ type MockSupervisor struct {
 	mock.Mock
 }
 
-func (m *MockSupervisor) Start() error {
-	return m.Called().Error(0)
+func (m *MockSupervisor) Start(api plugin.API) error {
+	return m.Called(api).Error(0)
 }
 
 func (m *MockSupervisor) Stop() error {
@@ -54,6 +54,10 @@ func (m *MockSupervisor) Stop() error {
 
 func (m *MockSupervisor) Hooks() plugin.Hooks {
 	return m.Called().Get(0).(plugin.Hooks)
+}
+
+func (m *MockSupervisor) Wait() error {
+	return m.Called().Get(0).(error)
 }
 
 func initTmpDir(t *testing.T, files map[string]string) string {
@@ -130,7 +134,7 @@ func TestEnvironment(t *testing.T) {
 	activePlugins := env.ActivePlugins()
 	assert.Len(t, activePlugins, 0)
 
-	assert.Error(t, env.ActivatePlugin("x"))
+	assert.Error(t, env.ActivatePlugin("x", nil))
 
 	var api struct{ plugin.API }
 	var supervisor MockSupervisor
@@ -141,17 +145,15 @@ func TestEnvironment(t *testing.T) {
 	provider.On("API").Return(&api, nil)
 	provider.On("Supervisor").Return(&supervisor, nil)
 
-	supervisor.On("Start").Return(nil)
+	supervisor.On("Start", &api).Return(nil)
 	supervisor.On("Stop").Return(nil)
 	supervisor.On("Hooks").Return(&hooks)
 
-	hooks.On("OnActivate", &api).Return(nil)
-
-	assert.NoError(t, env.ActivatePlugin("foo"))
+	assert.NoError(t, env.ActivatePlugin("foo", nil))
 	assert.Equal(t, env.ActivePluginIds(), []string{"foo"})
 	activePlugins = env.ActivePlugins()
 	assert.Len(t, activePlugins, 1)
-	assert.Error(t, env.ActivatePlugin("foo"))
+	assert.Error(t, env.ActivatePlugin("foo", nil))
 	assert.True(t, env.IsPluginActive("foo"))
 
 	hooks.On("OnDeactivate").Return(nil)
@@ -159,7 +161,7 @@ func TestEnvironment(t *testing.T) {
 	assert.Error(t, env.DeactivatePlugin("foo"))
 	assert.False(t, env.IsPluginActive("foo"))
 
-	assert.NoError(t, env.ActivatePlugin("foo"))
+	assert.NoError(t, env.ActivatePlugin("foo", nil))
 	assert.Equal(t, env.ActivePluginIds(), []string{"foo"})
 
 	assert.Equal(t, env.SearchPath(), dir)
@@ -186,7 +188,7 @@ func TestEnvironment_DuplicatePluginError(t *testing.T) {
 	require.NoError(t, err)
 	defer env.Shutdown()
 
-	assert.Error(t, env.ActivatePlugin("foo"))
+	assert.Error(t, env.ActivatePlugin("foo", nil))
 	assert.Empty(t, env.ActivePluginIds())
 }
 
@@ -202,7 +204,7 @@ func TestEnvironment_BadSearchPathError(t *testing.T) {
 	require.NoError(t, err)
 	defer env.Shutdown()
 
-	assert.Error(t, env.ActivatePlugin("foo"))
+	assert.Error(t, env.ActivatePlugin("foo", nil))
 	assert.Empty(t, env.ActivePluginIds())
 }
 
@@ -238,17 +240,7 @@ func TestEnvironment_ActivatePluginErrors(t *testing.T) {
 			provider.On("API").Return(&api, nil)
 			provider.On("Supervisor").Return(&supervisor, nil)
 
-			supervisor.On("Start").Return(fmt.Errorf("test error"))
-		},
-		"HooksError": func() {
-			provider.On("API").Return(&api, nil)
-			provider.On("Supervisor").Return(&supervisor, nil)
-
-			supervisor.On("Start").Return(nil)
-			supervisor.On("Stop").Return(nil)
-			supervisor.On("Hooks").Return(&hooks)
-
-			hooks.On("OnActivate", &api).Return(fmt.Errorf("test error"))
+			supervisor.On("Start", &api).Return(fmt.Errorf("test error"))
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -256,7 +248,7 @@ func TestEnvironment_ActivatePluginErrors(t *testing.T) {
 			hooks.Mock = mock.Mock{}
 			provider.Mock = mock.Mock{}
 			setup()
-			assert.Error(t, env.ActivatePlugin("foo"))
+			assert.Error(t, env.ActivatePlugin("foo", nil))
 			assert.Empty(t, env.ActivePluginIds())
 			supervisor.AssertExpectations(t)
 			hooks.AssertExpectations(t)
@@ -291,14 +283,13 @@ func TestEnvironment_ShutdownError(t *testing.T) {
 	provider.On("API").Return(&api, nil)
 	provider.On("Supervisor").Return(&supervisor, nil)
 
-	supervisor.On("Start").Return(nil)
+	supervisor.On("Start", &api).Return(nil)
 	supervisor.On("Stop").Return(fmt.Errorf("test error"))
 	supervisor.On("Hooks").Return(&hooks)
 
-	hooks.On("OnActivate", &api).Return(nil)
 	hooks.On("OnDeactivate").Return(fmt.Errorf("test error"))
 
-	assert.NoError(t, env.ActivatePlugin("foo"))
+	assert.NoError(t, env.ActivatePlugin("foo", nil))
 	assert.Equal(t, env.ActivePluginIds(), []string{"foo"})
 	assert.Len(t, env.Shutdown(), 2)
 }
@@ -329,13 +320,12 @@ func TestEnvironment_ConcurrentHookInvocations(t *testing.T) {
 	provider.On("API").Return(&api, nil)
 	provider.On("Supervisor").Return(&supervisor, nil)
 
-	supervisor.On("Start").Return(nil)
+	supervisor.On("Start", &api).Return(nil)
 	supervisor.On("Stop").Return(nil)
 	supervisor.On("Hooks").Return(&hooks)
 
 	ch := make(chan bool)
 
-	hooks.On("OnActivate", &api).Return(nil)
 	hooks.On("OnDeactivate").Return(nil)
 	hooks.On("ServeHTTP", mock.AnythingOfType("*httptest.ResponseRecorder"), mock.AnythingOfType("*http.Request")).Run(func(args mock.Arguments) {
 		r := args.Get(1).(*http.Request)
@@ -346,7 +336,7 @@ func TestEnvironment_ConcurrentHookInvocations(t *testing.T) {
 		}
 	})
 
-	assert.NoError(t, env.ActivatePlugin("foo"))
+	assert.NoError(t, env.ActivatePlugin("foo", nil))
 
 	rec := httptest.NewRecorder()
 
@@ -368,4 +358,52 @@ func TestEnvironment_ConcurrentHookInvocations(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+func TestEnvironment_HooksForPlugins(t *testing.T) {
+	dir := initTmpDir(t, map[string]string{
+		"foo/plugin.json": `{"id": "foo", "backend": {}}`,
+	})
+	defer os.RemoveAll(dir)
+
+	var provider MockProvider
+	defer provider.AssertExpectations(t)
+
+	env, err := New(
+		SearchPath(dir),
+		APIProvider(provider.API),
+		SupervisorProvider(provider.Supervisor),
+	)
+	require.NoError(t, err)
+	defer env.Shutdown()
+
+	var api struct{ plugin.API }
+	var supervisor MockSupervisor
+	defer supervisor.AssertExpectations(t)
+	var hooks plugintest.Hooks
+	defer hooks.AssertExpectations(t)
+
+	provider.On("API").Return(&api, nil)
+	provider.On("Supervisor").Return(&supervisor, nil)
+
+	supervisor.On("Start", &api).Return(nil)
+	supervisor.On("Stop").Return(nil)
+	supervisor.On("Hooks").Return(&hooks)
+
+	hooks.On("OnDeactivate").Return(nil)
+	hooks.On("ExecuteCommand", mock.AnythingOfType("*model.CommandArgs")).Return(&model.CommandResponse{
+		Text: "bar",
+	}, nil)
+
+	assert.NoError(t, env.ActivatePlugin("foo", nil))
+	assert.Equal(t, env.ActivePluginIds(), []string{"foo"})
+
+	resp, appErr, err := env.HooksForPlugin("foo").ExecuteCommand(&model.CommandArgs{
+		Command: "/foo",
+	})
+	assert.Equal(t, "bar", resp.Text)
+	assert.Nil(t, appErr)
+	assert.NoError(t, err)
+
+	assert.Empty(t, env.Shutdown())
 }

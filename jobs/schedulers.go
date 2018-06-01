@@ -4,13 +4,12 @@
 package jobs
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
-	l4g "github.com/alecthomas/log4go"
-
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 type Schedulers struct {
@@ -26,7 +25,7 @@ type Schedulers struct {
 }
 
 func (srv *JobServer) InitSchedulers() *Schedulers {
-	l4g.Debug("Initialising schedulers.")
+	mlog.Debug("Initialising schedulers.")
 
 	schedulers := &Schedulers{
 		stop:          make(chan bool),
@@ -39,6 +38,10 @@ func (srv *JobServer) InitSchedulers() *Schedulers {
 		schedulers.schedulers = append(schedulers.schedulers, srv.DataRetentionJob.MakeScheduler())
 	}
 
+	if srv.MessageExportJob != nil {
+		schedulers.schedulers = append(schedulers.schedulers, srv.MessageExportJob.MakeScheduler())
+	}
+
 	if elasticsearchAggregatorInterface := srv.ElasticsearchAggregator; elasticsearchAggregatorInterface != nil {
 		schedulers.schedulers = append(schedulers.schedulers, elasticsearchAggregatorInterface.MakeScheduler())
 	}
@@ -47,19 +50,23 @@ func (srv *JobServer) InitSchedulers() *Schedulers {
 		schedulers.schedulers = append(schedulers.schedulers, ldapSyncInterface.MakeScheduler())
 	}
 
+	if migrationsInterface := srv.Migrations; migrationsInterface != nil {
+		schedulers.schedulers = append(schedulers.schedulers, migrationsInterface.MakeScheduler())
+	}
+
 	schedulers.nextRunTimes = make([]*time.Time, len(schedulers.schedulers))
 	return schedulers
 }
 
 func (schedulers *Schedulers) Start() *Schedulers {
-	schedulers.listenerId = utils.AddConfigListener(schedulers.handleConfigChange)
+	schedulers.listenerId = schedulers.jobs.ConfigService.AddConfigListener(schedulers.handleConfigChange)
 
 	go func() {
 		schedulers.startOnce.Do(func() {
-			l4g.Info("Starting schedulers.")
+			mlog.Info("Starting schedulers.")
 
 			defer func() {
-				l4g.Info("Schedulers stopped.")
+				mlog.Info("Schedulers stopped.")
 				close(schedulers.stopped)
 			}()
 
@@ -75,7 +82,7 @@ func (schedulers *Schedulers) Start() *Schedulers {
 			for {
 				select {
 				case <-schedulers.stop:
-					l4g.Debug("Schedulers received stop signal.")
+					mlog.Debug("Schedulers received stop signal.")
 					return
 				case now = <-time.After(1 * time.Minute):
 					cfg := schedulers.jobs.Config()
@@ -90,8 +97,8 @@ func (schedulers *Schedulers) Start() *Schedulers {
 							if scheduler != nil {
 								if scheduler.Enabled(cfg) {
 									if _, err := schedulers.scheduleJob(cfg, scheduler); err != nil {
-										l4g.Warn("Failed to schedule job with scheduler: %v", scheduler.Name())
-										l4g.Error(err)
+										mlog.Warn(fmt.Sprintf("Failed to schedule job with scheduler: %v", scheduler.Name()))
+										mlog.Error(fmt.Sprint(err))
 									} else {
 										schedulers.setNextRunTime(cfg, idx, now, true)
 									}
@@ -116,7 +123,7 @@ func (schedulers *Schedulers) Start() *Schedulers {
 }
 
 func (schedulers *Schedulers) Stop() *Schedulers {
-	l4g.Info("Stopping schedulers.")
+	mlog.Info("Stopping schedulers.")
 	close(schedulers.stop)
 	<-schedulers.stopped
 	return schedulers
@@ -127,7 +134,7 @@ func (schedulers *Schedulers) setNextRunTime(cfg *model.Config, idx int, now tim
 
 	if !pendingJobs {
 		if pj, err := schedulers.jobs.CheckForPendingJobsByType(scheduler.JobType()); err != nil {
-			l4g.Error("Failed to set next job run time: " + err.Error())
+			mlog.Error("Failed to set next job run time: " + err.Error())
 			schedulers.nextRunTimes[idx] = nil
 			return
 		} else {
@@ -137,13 +144,13 @@ func (schedulers *Schedulers) setNextRunTime(cfg *model.Config, idx int, now tim
 
 	lastSuccessfulJob, err := schedulers.jobs.GetLastSuccessfulJobByType(scheduler.JobType())
 	if err != nil {
-		l4g.Error("Failed to set next job run time: " + err.Error())
+		mlog.Error("Failed to set next job run time: " + err.Error())
 		schedulers.nextRunTimes[idx] = nil
 		return
 	}
 
 	schedulers.nextRunTimes[idx] = scheduler.NextScheduleTime(cfg, now, pendingJobs, lastSuccessfulJob)
-	l4g.Debug("Next run time for scheduler %v: %v", scheduler.Name(), schedulers.nextRunTimes[idx])
+	mlog.Debug(fmt.Sprintf("Next run time for scheduler %v: %v", scheduler.Name(), schedulers.nextRunTimes[idx]))
 }
 
 func (schedulers *Schedulers) scheduleJob(cfg *model.Config, scheduler model.Scheduler) (*model.Job, *model.AppError) {
@@ -161,6 +168,6 @@ func (schedulers *Schedulers) scheduleJob(cfg *model.Config, scheduler model.Sch
 }
 
 func (schedulers *Schedulers) handleConfigChange(oldConfig *model.Config, newConfig *model.Config) {
-	l4g.Debug("Schedulers received config change.")
+	mlog.Debug("Schedulers received config change.")
 	schedulers.configChanged <- newConfig
 }

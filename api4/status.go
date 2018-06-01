@@ -6,15 +6,10 @@ package api4
 import (
 	"net/http"
 
-	l4g "github.com/alecthomas/log4go"
-
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 func (api *API) InitStatus() {
-	l4g.Debug(utils.T("api.status.init.debug"))
-
 	api.BaseRoutes.User.Handle("/status", api.ApiSessionRequired(getUserStatus)).Methods("GET")
 	api.BaseRoutes.Users.Handle("/status/ids", api.ApiSessionRequired(getUserStatusesByIds)).Methods("POST")
 	api.BaseRoutes.User.Handle("/status", api.ApiSessionRequired(updateUserStatus)).Methods("PUT")
@@ -74,6 +69,11 @@ func updateUserStatus(c *Context, w http.ResponseWriter, r *http.Request) {
 	if !c.App.SessionHasPermissionToUser(c.Session, c.Params.UserId) {
 		c.SetPermissionError(model.PERMISSION_EDIT_OTHER_USERS)
 		return
+	}
+
+	currentStatus, err := c.App.GetStatus(c.Params.UserId)
+	if err == nil && currentStatus.Status == model.STATUS_OUT_OF_OFFICE && status.Status != model.STATUS_OUT_OF_OFFICE {
+		c.App.DisableAutoResponder(c.Params.UserId, c.IsSystemAdmin())
 	}
 
 	switch status.Status {

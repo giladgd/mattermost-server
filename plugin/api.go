@@ -16,6 +16,13 @@ type API interface {
 	// struct that the configuration JSON can be unmarshalled to.
 	LoadPluginConfiguration(dest interface{}) error
 
+	// RegisterCommand registers a custom slash command. When the command is triggered, your plugin
+	// can fulfill it via the ExecuteCommand hook.
+	RegisterCommand(command *model.Command) error
+
+	// UnregisterCommand unregisters a command previously registered via RegisterCommand.
+	UnregisterCommand(teamId, trigger string) error
+
 	// CreateUser creates a user.
 	CreateUser(user *model.User) (*model.User, *model.AppError)
 
@@ -70,6 +77,21 @@ type API interface {
 	// UpdateChannel updates a channel.
 	UpdateChannel(channel *model.Channel) (*model.Channel, *model.AppError)
 
+	// AddChannelMember creates a channel membership for a user.
+	AddChannelMember(channelId, userId string) (*model.ChannelMember, *model.AppError)
+
+	// GetChannelMember gets a channel membership for a user.
+	GetChannelMember(channelId, userId string) (*model.ChannelMember, *model.AppError)
+
+	// UpdateChannelMemberRoles updates a user's roles for a channel.
+	UpdateChannelMemberRoles(channelId, userId, newRoles string) (*model.ChannelMember, *model.AppError)
+
+	// UpdateChannelMemberNotifications updates a user's notification properties for a channel.
+	UpdateChannelMemberNotifications(channelId, userId string, notifications map[string]string) (*model.ChannelMember, *model.AppError)
+
+	// DeleteChannelMember deletes a channel membership for a user.
+	DeleteChannelMember(channelId, userId string) *model.AppError
+
 	// CreatePost creates a post.
 	CreatePost(post *model.Post) (*model.Post, *model.AppError)
 
@@ -79,6 +101,20 @@ type API interface {
 	// GetPost gets a post.
 	GetPost(postId string) (*model.Post, *model.AppError)
 
-	// Update post updates a post.
+	// UpdatePost updates a post.
 	UpdatePost(post *model.Post) (*model.Post, *model.AppError)
+
+	// KeyValueStore returns an object for accessing the persistent key value storage.
+	KeyValueStore() KeyValueStore
+}
+
+type KeyValueStore interface {
+	// Set will store a key-value pair, unique per plugin.
+	Set(key string, value []byte) *model.AppError
+
+	// Get will retrieve a value based on the key. Returns nil for non-existent keys.
+	Get(key string) ([]byte, *model.AppError)
+
+	// Delete will remove a key-value pair. Returns nil for non-existent keys.
+	Delete(key string) *model.AppError
 }

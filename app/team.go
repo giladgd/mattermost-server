@@ -4,14 +4,18 @@
 package app
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/png"
+	"mime/multipart"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 
-	l4g "github.com/alecthomas/log4go"
+	"github.com/disintegration/imaging"
 
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/utils"
 )
@@ -99,12 +103,31 @@ func (a *App) UpdateTeam(team *model.Team) (*model.Team, *model.AppError) {
 	oldTeam.AllowOpenInvite = team.AllowOpenInvite
 	oldTeam.CompanyName = team.CompanyName
 	oldTeam.AllowedDomains = team.AllowedDomains
+	oldTeam.LastTeamIconUpdate = team.LastTeamIconUpdate
 
 	if result := <-a.Srv.Store.Team().Update(oldTeam); result.Err != nil {
 		return nil, result.Err
 	}
 
-	a.sendUpdatedTeamEvent(oldTeam)
+	a.sendTeamEvent(oldTeam, model.WEBSOCKET_EVENT_UPDATE_TEAM)
+
+	return oldTeam, nil
+}
+
+func (a *App) UpdateTeamScheme(team *model.Team) (*model.Team, *model.AppError) {
+	var oldTeam *model.Team
+	var err *model.AppError
+	if oldTeam, err = a.GetTeam(team.Id); err != nil {
+		return nil, err
+	}
+
+	oldTeam.SchemeId = team.SchemeId
+
+	if result := <-a.Srv.Store.Team().Update(oldTeam); result.Err != nil {
+		return nil, result.Err
+	}
+
+	a.sendTeamEvent(oldTeam, model.WEBSOCKET_EVENT_UPDATE_TEAM)
 
 	return oldTeam, nil
 }
@@ -122,34 +145,46 @@ func (a *App) PatchTeam(teamId string, patch *model.TeamPatch) (*model.Team, *mo
 		return nil, err
 	}
 
-	a.sendUpdatedTeamEvent(updatedTeam)
+	a.sendTeamEvent(updatedTeam, model.WEBSOCKET_EVENT_UPDATE_TEAM)
 
 	return updatedTeam, nil
 }
 
-func (a *App) sendUpdatedTeamEvent(team *model.Team) {
+func (a *App) sendTeamEvent(team *model.Team, event string) {
 	sanitizedTeam := &model.Team{}
 	*sanitizedTeam = *team
 	sanitizedTeam.Sanitize()
 
-	message := model.NewWebSocketEvent(model.WEBSOCKET_EVENT_UPDATE_TEAM, "", "", "", nil)
+	message := model.NewWebSocketEvent(event, "", "", "", nil)
 	message.Add("team", sanitizedTeam.ToJson())
-	a.Go(func() {
-		a.Publish(message)
-	})
+	a.Publish(message)
+}
+
+func (a *App) GetSchemeRolesForTeam(teamId string) (string, string, *model.AppError) {
+	var team *model.Team
+	var err *model.AppError
+
+	if team, err = a.GetTeam(teamId); err != nil {
+		return "", "", err
+	}
+
+	if team.SchemeId != nil && len(*team.SchemeId) != 0 {
+		if scheme, err := a.GetScheme(*team.SchemeId); err != nil {
+			return "", "", err
+		} else {
+			return scheme.DefaultTeamUserRole, scheme.DefaultTeamAdminRole, nil
+		}
+	}
+
+	return model.TEAM_USER_ROLE_ID, model.TEAM_ADMIN_ROLE_ID, nil
 }
 
 func (a *App) UpdateTeamMemberRoles(teamId string, userId string, newRoles string) (*model.TeamMember, *model.AppError) {
 	var member *model.TeamMember
-	if result := <-a.Srv.Store.Team().GetTeamsForUser(userId); result.Err != nil {
+	if result := <-a.Srv.Store.Team().GetMember(teamId, userId); result.Err != nil {
 		return nil, result.Err
 	} else {
-		members := result.Data.([]*model.TeamMember)
-		for _, m := range members {
-			if m.TeamId == teamId {
-				member = m
-			}
-		}
+		member = result.Data.(*model.TeamMember)
 	}
 
 	if member == nil {
@@ -157,10 +192,42 @@ func (a *App) UpdateTeamMemberRoles(teamId string, userId string, newRoles strin
 		return nil, err
 	}
 
-	member.Roles = newRoles
+	schemeUserRole, schemeAdminRole, err := a.GetSchemeRolesForTeam(teamId)
+	if err != nil {
+		return nil, err
+	}
+
+	var newExplicitRoles []string
+	member.SchemeUser = false
+	member.SchemeAdmin = false
+
+	for _, roleName := range strings.Fields(newRoles) {
+		if role, err := a.GetRoleByName(roleName); err != nil {
+			err.StatusCode = http.StatusBadRequest
+			return nil, err
+		} else if !role.SchemeManaged {
+			// The role is not scheme-managed, so it's OK to apply it to the explicit roles field.
+			newExplicitRoles = append(newExplicitRoles, roleName)
+		} else {
+			// The role is scheme-managed, so need to check if it is part of the scheme for this channel or not.
+			switch roleName {
+			case schemeAdminRole:
+				member.SchemeAdmin = true
+			case schemeUserRole:
+				member.SchemeUser = true
+			default:
+				// If not part of the scheme for this channel, then it is not allowed to apply it as an explicit role.
+				return nil, model.NewAppError("UpdateTeamMemberRoles", "api.channel.update_team_member_roles.scheme_role.app_error", nil, "role_name="+roleName, http.StatusBadRequest)
+			}
+		}
+	}
+
+	member.ExplicitRoles = strings.Join(newExplicitRoles, " ")
 
 	if result := <-a.Srv.Store.Team().UpdateMember(member); result.Err != nil {
 		return nil, result.Err
+	} else {
+		member = result.Data.(*model.TeamMember)
 	}
 
 	a.ClearSessionCacheForUser(userId)
@@ -173,10 +240,7 @@ func (a *App) UpdateTeamMemberRoles(teamId string, userId string, newRoles strin
 func (a *App) sendUpdatedMemberRoleEvent(userId string, member *model.TeamMember) {
 	message := model.NewWebSocketEvent(model.WEBSOCKET_EVENT_MEMBERROLE_UPDATED, "", "", userId, nil)
 	message.Add("member", member.ToJson())
-
-	a.Go(func() {
-		a.Publish(message)
-	})
+	a.Publish(message)
 }
 
 func (a *App) AddUserToTeam(teamId string, userId string, userRequestorId string) (*model.Team, *model.AppError) {
@@ -212,19 +276,25 @@ func (a *App) AddUserToTeamByTeamId(teamId string, user *model.User) *model.AppE
 	}
 }
 
-func (a *App) AddUserToTeamByHash(userId string, hash string, data string) (*model.Team, *model.AppError) {
-	props := model.MapFromJson(strings.NewReader(data))
-
-	if hash != utils.HashSha256(fmt.Sprintf("%v:%v", data, a.Config().EmailSettings.InviteSalt)) {
-		return nil, model.NewAppError("JoinUserToTeamByHash", "api.user.create_user.signup_link_invalid.app_error", nil, "", http.StatusBadRequest)
+func (a *App) AddUserToTeamByToken(userId string, tokenId string) (*model.Team, *model.AppError) {
+	result := <-a.Srv.Store.Token().GetByToken(tokenId)
+	if result.Err != nil {
+		return nil, model.NewAppError("AddUserToTeamByToken", "api.user.create_user.signup_link_invalid.app_error", nil, result.Err.Error(), http.StatusBadRequest)
 	}
 
-	t, timeErr := strconv.ParseInt(props["time"], 10, 64)
-	if timeErr != nil || model.GetMillis()-t > 1000*60*60*48 { // 48 hours
-		return nil, model.NewAppError("JoinUserToTeamByHash", "api.user.create_user.signup_link_expired.app_error", nil, "", http.StatusBadRequest)
+	token := result.Data.(*model.Token)
+	if token.Type != TOKEN_TYPE_TEAM_INVITATION {
+		return nil, model.NewAppError("AddUserToTeamByToken", "api.user.create_user.signup_link_invalid.app_error", nil, "", http.StatusBadRequest)
 	}
 
-	tchan := a.Srv.Store.Team().Get(props["id"])
+	if model.GetMillis()-token.CreateAt >= TEAM_INVITATION_EXPIRY_TIME {
+		a.DeleteToken(token)
+		return nil, model.NewAppError("AddUserToTeamByToken", "api.user.create_user.signup_link_expired.app_error", nil, "", http.StatusBadRequest)
+	}
+
+	tokenData := model.MapFromJson(strings.NewReader(token.Extra))
+
+	tchan := a.Srv.Store.Team().Get(tokenData["teamId"])
 	uchan := a.Srv.Store.User().Get(userId)
 
 	var team *model.Team
@@ -242,6 +312,10 @@ func (a *App) AddUserToTeamByHash(userId string, hash string, data string) (*mod
 	}
 
 	if err := a.JoinUserToTeam(team, user, ""); err != nil {
+		return nil, err
+	}
+
+	if err := a.DeleteToken(token); err != nil {
 		return nil, err
 	}
 
@@ -279,13 +353,13 @@ func (a *App) AddUserToTeamByInviteId(inviteId string, userId string) (*model.Te
 // 3. a pointer to an AppError if something went wrong.
 func (a *App) joinUserToTeam(team *model.Team, user *model.User) (*model.TeamMember, bool, *model.AppError) {
 	tm := &model.TeamMember{
-		TeamId: team.Id,
-		UserId: user.Id,
-		Roles:  model.TEAM_USER_ROLE_ID,
+		TeamId:     team.Id,
+		UserId:     user.Id,
+		SchemeUser: true,
 	}
 
 	if team.Email == user.Email {
-		tm.Roles = model.TEAM_USER_ROLE_ID + " " + model.TEAM_ADMIN_ROLE_ID
+		tm.SchemeAdmin = true
 	}
 
 	if etmr := <-a.Srv.Store.Team().GetMember(team.Id, user.Id); etmr.Err == nil {
@@ -297,10 +371,16 @@ func (a *App) joinUserToTeam(team *model.Team, user *model.User) (*model.TeamMem
 			return rtm, true, nil
 		}
 
-		if tmr := <-a.Srv.Store.Team().UpdateMember(tm); tmr.Err != nil {
-			return nil, false, tmr.Err
+		if membersCount := <-a.Srv.Store.Team().GetActiveMemberCount(tm.TeamId); membersCount.Err != nil {
+			return nil, false, membersCount.Err
+		} else if membersCount.Data.(int64) >= int64(*a.Config().TeamSettings.MaxUsersPerTeam) {
+			return nil, false, model.NewAppError("joinUserToTeam", "app.team.join_user_to_team.max_accounts.app_error", nil, "teamId="+tm.TeamId, http.StatusBadRequest)
 		} else {
-			return tmr.Data.(*model.TeamMember), false, nil
+			if tmr := <-a.Srv.Store.Team().UpdateMember(tm); tmr.Err != nil {
+				return nil, false, tmr.Err
+			} else {
+				return tmr.Data.(*model.TeamMember), false, nil
+			}
 		}
 	} else {
 		// Membership appears to be missing.  Lets try to add.
@@ -323,15 +403,11 @@ func (a *App) JoinUserToTeam(team *model.Team, user *model.User, userRequestorId
 		return uua.Err
 	}
 
-	channelRole := model.CHANNEL_USER_ROLE_ID
-
-	if team.Email == user.Email {
-		channelRole = model.CHANNEL_USER_ROLE_ID + " " + model.CHANNEL_ADMIN_ROLE_ID
-	}
+	shouldBeAdmin := team.Email == user.Email
 
 	// Soft error if there is an issue joining the default channels
-	if err := a.JoinDefaultChannels(team.Id, user, channelRole, userRequestorId); err != nil {
-		l4g.Error(utils.T("api.user.create_user.joining.error"), user.Id, team.Id, err)
+	if err := a.JoinDefaultChannels(team.Id, user, shouldBeAdmin, userRequestorId); err != nil {
+		mlog.Error(fmt.Sprintf("Encountered an issue joining default channels err=%v", err), mlog.String("user_id", user.Id), mlog.String("team_id", team.Id))
 	}
 
 	a.ClearSessionCacheForUser(user.Id)
@@ -500,11 +576,11 @@ func (a *App) AddTeamMembers(teamId string, userIds []string, userRequestorId st
 	return members, nil
 }
 
-func (a *App) AddTeamMemberByHash(userId, hash, data string) (*model.TeamMember, *model.AppError) {
+func (a *App) AddTeamMemberByToken(userId, tokenId string) (*model.TeamMember, *model.AppError) {
 	var team *model.Team
 	var err *model.AppError
 
-	if team, err = a.AddUserToTeamByHash(userId, hash, data); err != nil {
+	if team, err = a.AddUserToTeamByToken(userId, tokenId); err != nil {
 		return nil, err
 	}
 
@@ -616,13 +692,15 @@ func (a *App) LeaveTeam(team *model.Team, user *model.User, requestorId string) 
 		channel = result.Data.(*model.Channel)
 	}
 
-	if requestorId == user.Id {
-		if err := a.postLeaveTeamMessage(user, channel); err != nil {
-			l4g.Error(utils.T("api.channel.post_user_add_remove_message_and_forget.error"), err)
-		}
-	} else {
-		if err := a.PostRemoveFromChannelMessage(user.Id, user, channel); err != nil {
-			l4g.Error(utils.T("api.channel.post_user_add_remove_message_and_forget.error"), err)
+	if *a.Config().ServiceSettings.ExperimentalEnableDefaultChannelLeaveJoinMessages {
+		if requestorId == user.Id {
+			if err := a.postLeaveTeamMessage(user, channel); err != nil {
+				mlog.Error(fmt.Sprint("Failed to post join/leave message", err))
+			}
+		} else {
+			if err := a.postRemoveFromTeamMessage(user, channel); err != nil {
+				mlog.Error(fmt.Sprint("Failed to post join/leave message", err))
+			}
 		}
 	}
 
@@ -672,6 +750,24 @@ func (a *App) postLeaveTeamMessage(user *model.User, channel *model.Channel) *mo
 	return nil
 }
 
+func (a *App) postRemoveFromTeamMessage(user *model.User, channel *model.Channel) *model.AppError {
+	post := &model.Post{
+		ChannelId: channel.Id,
+		Message:   fmt.Sprintf(utils.T("api.team.remove_user_from_team.removed"), user.Username),
+		Type:      model.POST_REMOVE_FROM_TEAM,
+		UserId:    user.Id,
+		Props: model.StringInterface{
+			"username": user.Username,
+		},
+	}
+
+	if _, err := a.CreatePost(post, channel, false); err != nil {
+		return model.NewAppError("postRemoveFromTeamMessage", "api.channel.post_user_add_remove_message_and_forget.error", nil, err.Error(), http.StatusInternalServerError)
+	}
+
+	return nil
+}
+
 func (a *App) InviteNewUsersToTeam(emailList []string, teamId, senderId string) *model.AppError {
 	if len(emailList) == 0 {
 		err := model.NewAppError("InviteNewUsersToTeam", "api.team.invite_members.no_one.app_error", nil, "", http.StatusBadRequest)
@@ -710,7 +806,7 @@ func (a *App) InviteNewUsersToTeam(emailList []string, teamId, senderId string) 
 	}
 
 	nameFormat := *a.Config().TeamSettings.TeammateNameDisplay
-	a.SendInviteEmails(team, user.GetDisplayName(nameFormat), emailList, utils.GetSiteURL())
+	a.SendInviteEmails(team, user.GetDisplayName(nameFormat), emailList, a.GetSiteURL())
 
 	return nil
 }
@@ -800,6 +896,8 @@ func (a *App) PermanentDeleteTeam(team *model.Team) *model.AppError {
 		return result.Err
 	}
 
+	a.sendTeamEvent(team, model.WEBSOCKET_EVENT_DELETE_TEAM)
+
 	return nil
 }
 
@@ -813,6 +911,8 @@ func (a *App) SoftDeleteTeam(teamId string) *model.AppError {
 	if result := <-a.Srv.Store.Team().Update(team); result.Err != nil {
 		return result.Err
 	}
+
+	a.sendTeamEvent(team, model.WEBSOCKET_EVENT_DELETE_TEAM)
 
 	return nil
 }
@@ -840,27 +940,32 @@ func (a *App) GetTeamStats(teamId string) (*model.TeamStats, *model.AppError) {
 }
 
 func (a *App) GetTeamIdFromQuery(query url.Values) (string, *model.AppError) {
-	hash := query.Get("h")
+	tokenId := query.Get("t")
 	inviteId := query.Get("id")
 
-	if len(hash) > 0 {
-		data := query.Get("d")
-		props := model.MapFromJson(strings.NewReader(data))
-
-		if hash != utils.HashSha256(fmt.Sprintf("%v:%v", data, a.Config().EmailSettings.InviteSalt)) {
+	if len(tokenId) > 0 {
+		result := <-a.Srv.Store.Token().GetByToken(tokenId)
+		if result.Err != nil {
 			return "", model.NewAppError("GetTeamIdFromQuery", "api.oauth.singup_with_oauth.invalid_link.app_error", nil, "", http.StatusBadRequest)
 		}
 
-		t, err := strconv.ParseInt(props["time"], 10, 64)
-		if err != nil || model.GetMillis()-t > 1000*60*60*48 { // 48 hours
+		token := result.Data.(*model.Token)
+		if token.Type != TOKEN_TYPE_TEAM_INVITATION {
+			return "", model.NewAppError("GetTeamIdFromQuery", "api.oauth.singup_with_oauth.invalid_link.app_error", nil, "", http.StatusBadRequest)
+		}
+
+		if model.GetMillis()-token.CreateAt >= TEAM_INVITATION_EXPIRY_TIME {
+			a.DeleteToken(token)
 			return "", model.NewAppError("GetTeamIdFromQuery", "api.oauth.singup_with_oauth.expired_link.app_error", nil, "", http.StatusBadRequest)
 		}
 
-		return props["id"], nil
+		tokenData := model.MapFromJson(strings.NewReader(token.Extra))
+
+		return tokenData["teamId"], nil
 	} else if len(inviteId) > 0 {
 		if result := <-a.Srv.Store.Team().GetByInviteId(inviteId); result.Err != nil {
 			// soft fail, so we still create user but don't auto-join team
-			l4g.Error("%v", result.Err)
+			mlog.Error(fmt.Sprintf("%v", result.Err))
 		} else {
 			return result.Data.(*model.Team).Id, nil
 		}
@@ -883,4 +988,106 @@ func (a *App) SanitizeTeams(session model.Session, teams []*model.Team) []*model
 	}
 
 	return teams
+}
+
+func (a *App) GetTeamIcon(team *model.Team) ([]byte, *model.AppError) {
+	if len(*a.Config().FileSettings.DriverName) == 0 {
+		return nil, model.NewAppError("GetTeamIcon", "api.team.get_team_icon.filesettings_no_driver.app_error", nil, "", http.StatusNotImplemented)
+	} else {
+		path := "teams/" + team.Id + "/teamIcon.png"
+		if data, err := a.ReadFile(path); err != nil {
+			return nil, model.NewAppError("GetTeamIcon", "api.team.get_team_icon.read_file.app_error", nil, err.Error(), http.StatusNotFound)
+		} else {
+			return data, nil
+		}
+	}
+}
+
+func (a *App) SetTeamIcon(teamId string, imageData *multipart.FileHeader) *model.AppError {
+	file, err := imageData.Open()
+	if err != nil {
+		return model.NewAppError("SetTeamIcon", "api.team.set_team_icon.open.app_error", nil, err.Error(), http.StatusBadRequest)
+	}
+	defer file.Close()
+	return a.SetTeamIconFromFile(teamId, file)
+}
+
+func (a *App) SetTeamIconFromFile(teamId string, file multipart.File) *model.AppError {
+
+	team, getTeamErr := a.GetTeam(teamId)
+
+	if getTeamErr != nil {
+		return model.NewAppError("SetTeamIcon", "api.team.set_team_icon.get_team.app_error", nil, getTeamErr.Error(), http.StatusBadRequest)
+	}
+
+	if len(*a.Config().FileSettings.DriverName) == 0 {
+		return model.NewAppError("setTeamIcon", "api.team.set_team_icon.storage.app_error", nil, "", http.StatusNotImplemented)
+	}
+
+	// Decode image config first to check dimensions before loading the whole thing into memory later on
+	config, _, err := image.DecodeConfig(file)
+	if err != nil {
+		return model.NewAppError("SetTeamIcon", "api.team.set_team_icon.decode_config.app_error", nil, err.Error(), http.StatusBadRequest)
+	} else if config.Width*config.Height > model.MaxImageSize {
+		return model.NewAppError("SetTeamIcon", "api.team.set_team_icon.too_large.app_error", nil, err.Error(), http.StatusBadRequest)
+	}
+
+	file.Seek(0, 0)
+
+	// Decode image into Image object
+	img, _, err := image.Decode(file)
+	if err != nil {
+		return model.NewAppError("SetTeamIcon", "api.team.set_team_icon.decode.app_error", nil, err.Error(), http.StatusBadRequest)
+	}
+
+	file.Seek(0, 0)
+
+	orientation, _ := getImageOrientation(file)
+	img = makeImageUpright(img, orientation)
+
+	// Scale team icon
+	teamIconWidthAndHeight := 128
+	img = imaging.Fill(img, teamIconWidthAndHeight, teamIconWidthAndHeight, imaging.Center, imaging.Lanczos)
+
+	buf := new(bytes.Buffer)
+	err = png.Encode(buf, img)
+	if err != nil {
+		return model.NewAppError("SetTeamIcon", "api.team.set_team_icon.encode.app_error", nil, err.Error(), http.StatusInternalServerError)
+	}
+
+	path := "teams/" + teamId + "/teamIcon.png"
+
+	if _, err := a.WriteFile(buf, path); err != nil {
+		return model.NewAppError("SetTeamIcon", "api.team.set_team_icon.write_file.app_error", nil, "", http.StatusInternalServerError)
+	}
+
+	curTime := model.GetMillis()
+
+	if result := <-a.Srv.Store.Team().UpdateLastTeamIconUpdate(teamId, curTime); result.Err != nil {
+		return model.NewAppError("SetTeamIcon", "api.team.team_icon.update.app_error", nil, result.Err.Error(), http.StatusBadRequest)
+	}
+
+	// manually set time to avoid possible cluster inconsistencies
+	team.LastTeamIconUpdate = curTime
+
+	a.sendTeamEvent(team, model.WEBSOCKET_EVENT_UPDATE_TEAM)
+
+	return nil
+}
+
+func (a *App) RemoveTeamIcon(teamId string) *model.AppError {
+	team, err := a.GetTeam(teamId)
+	if err != nil {
+		return model.NewAppError("RemoveTeamIcon", "api.team.remove_team_icon.get_team.app_error", nil, err.Error(), http.StatusBadRequest)
+	}
+
+	if result := <-a.Srv.Store.Team().UpdateLastTeamIconUpdate(teamId, 0); result.Err != nil {
+		return model.NewAppError("RemoveTeamIcon", "api.team.team_icon.update.app_error", nil, result.Err.Error(), http.StatusBadRequest)
+	}
+
+	team.LastTeamIconUpdate = 0
+
+	a.sendTeamEvent(team, model.WEBSOCKET_EVENT_UPDATE_TEAM)
+
+	return nil
 }

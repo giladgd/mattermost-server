@@ -4,32 +4,28 @@
 package api4
 
 import (
+	"fmt"
 	"net/http"
 
-	l4g "github.com/alecthomas/log4go"
 	"github.com/gorilla/websocket"
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 func (api *API) InitWebSocket() {
-	l4g.Debug(utils.T("api.web_socket.init.debug"))
-
 	api.BaseRoutes.ApiRoot.Handle("/websocket", api.ApiHandlerTrustRequester(connectWebSocket)).Methods("GET")
 }
 
 func connectWebSocket(c *Context, w http.ResponseWriter, r *http.Request) {
-	originChecker := utils.GetOriginChecker(r)
-
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  model.SOCKET_MAX_MESSAGE_SIZE_KB,
 		WriteBufferSize: model.SOCKET_MAX_MESSAGE_SIZE_KB,
-		CheckOrigin:     originChecker,
+		CheckOrigin:     c.App.OriginChecker(),
 	}
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		l4g.Error(utils.T("api.web_socket.connect.error"), err)
+		mlog.Error(fmt.Sprintf("websocket connect err: %v", err))
 		c.Err = model.NewAppError("connect", "api.web_socket.connect.upgrade.app_error", nil, "", http.StatusInternalServerError)
 		return
 	}

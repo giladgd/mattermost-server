@@ -27,7 +27,7 @@ func TestPostStore(t *testing.T, ss store.Store) {
 	t.Run("PermDelete1Level", func(t *testing.T) { testPostStorePermDelete1Level(t, ss) })
 	t.Run("PermDelete1Level2", func(t *testing.T) { testPostStorePermDelete1Level2(t, ss) })
 	t.Run("GetWithChildren", func(t *testing.T) { testPostStoreGetWithChildren(t, ss) })
-	t.Run("GetPostsWtihDetails", func(t *testing.T) { testPostStoreGetPostsWtihDetails(t, ss) })
+	t.Run("GetPostsWithDetails", func(t *testing.T) { testPostStoreGetPostsWithDetails(t, ss) })
 	t.Run("GetPostsBeforeAfter", func(t *testing.T) { testPostStoreGetPostsBeforeAfter(t, ss) })
 	t.Run("GetPostsSince", func(t *testing.T) { testPostStoreGetPostsSince(t, ss) })
 	t.Run("Search", func(t *testing.T) { testPostStoreSearch(t, ss) })
@@ -42,6 +42,7 @@ func TestPostStore(t *testing.T, ss store.Store) {
 	t.Run("GetPostsBatchForIndexing", func(t *testing.T) { testPostStoreGetPostsBatchForIndexing(t, ss) })
 	t.Run("PermanentDeleteBatch", func(t *testing.T) { testPostStorePermanentDeleteBatch(t, ss) })
 	t.Run("GetOldest", func(t *testing.T) { testPostStoreGetOldest(t, ss) })
+	t.Run("TestGetMaxPostSize", func(t *testing.T) { testGetMaxPostSize(t, ss) })
 }
 
 func testPostStoreSave(t *testing.T, ss store.Store) {
@@ -490,7 +491,7 @@ func testPostStoreGetWithChildren(t *testing.T, ss store.Store) {
 	}
 }
 
-func testPostStoreGetPostsWtihDetails(t *testing.T, ss store.Store) {
+func testPostStoreGetPostsWithDetails(t *testing.T, ss store.Store) {
 	o1 := &model.Post{}
 	o1.ChannelId = model.NewId()
 	o1.UserId = model.NewId()
@@ -591,6 +592,25 @@ func testPostStoreGetPostsWtihDetails(t *testing.T, ss store.Store) {
 	if r2.Posts[o1.Id].Message != o1.Message {
 		t.Fatal("Missing parent")
 	}
+
+	// Run once to fill cache
+	<-ss.Post().GetPosts(o1.ChannelId, 0, 30, true)
+
+	o6 := &model.Post{}
+	o6.ChannelId = o1.ChannelId
+	o6.UserId = model.NewId()
+	o6.Message = "zz" + model.NewId() + "b"
+	o6 = (<-ss.Post().Save(o6)).Data.(*model.Post)
+
+	// Should only be 6 since we hit the cache
+	r3 := (<-ss.Post().GetPosts(o1.ChannelId, 0, 30, true)).Data.(*model.PostList)
+	assert.Equal(t, 6, len(r3.Order))
+
+	ss.Post().InvalidateLastPostTimeCache(o1.ChannelId)
+
+	// Cache was invalidated, we should get all the posts
+	r4 := (<-ss.Post().GetPosts(o1.ChannelId, 0, 30, true)).Data.(*model.PostList)
+	assert.Equal(t, 7, len(r4.Order))
 }
 
 func testPostStoreGetPostsBeforeAfter(t *testing.T, ss store.Store) {
@@ -1408,7 +1428,7 @@ func testPostStoreGetFlaggedPostsForChannel(t *testing.T, ss store.Store) {
 }
 
 func testPostStoreGetPostsCreatedAt(t *testing.T, ss store.Store) {
-	createTime := model.GetMillis()
+	createTime := model.GetMillis() + 1
 
 	o0 := &model.Post{}
 	o0.ChannelId = model.NewId()
@@ -1418,12 +1438,11 @@ func testPostStoreGetPostsCreatedAt(t *testing.T, ss store.Store) {
 	o0 = (<-ss.Post().Save(o0)).Data.(*model.Post)
 
 	o1 := &model.Post{}
-	o1.ChannelId = o0.Id
+	o1.ChannelId = o0.ChannelId
 	o1.UserId = model.NewId()
 	o1.Message = "zz" + model.NewId() + "b"
-	o0.CreateAt = createTime
+	o1.CreateAt = createTime
 	o1 = (<-ss.Post().Save(o1)).Data.(*model.Post)
-	time.Sleep(2 * time.Millisecond)
 
 	o2 := &model.Post{}
 	o2.ChannelId = o1.ChannelId
@@ -1431,8 +1450,8 @@ func testPostStoreGetPostsCreatedAt(t *testing.T, ss store.Store) {
 	o2.Message = "zz" + model.NewId() + "b"
 	o2.ParentId = o1.Id
 	o2.RootId = o1.Id
+	o2.CreateAt = createTime + 1
 	o2 = (<-ss.Post().Save(o2)).Data.(*model.Post)
-	time.Sleep(2 * time.Millisecond)
 
 	o3 := &model.Post{}
 	o3.ChannelId = model.NewId()
@@ -1440,13 +1459,9 @@ func testPostStoreGetPostsCreatedAt(t *testing.T, ss store.Store) {
 	o3.Message = "zz" + model.NewId() + "b"
 	o3.CreateAt = createTime
 	o3 = (<-ss.Post().Save(o3)).Data.(*model.Post)
-	time.Sleep(2 * time.Millisecond)
 
 	r1 := (<-ss.Post().GetPostsCreatedAt(o1.ChannelId, createTime)).Data.([]*model.Post)
-
-	if len(r1) != 2 {
-		t.Fatalf("Got the wrong number of posts.")
-	}
+	assert.Equal(t, 2, len(r1))
 }
 
 func testPostStoreOverwrite(t *testing.T, ss store.Store) {
@@ -1710,4 +1725,9 @@ func testPostStoreGetOldest(t *testing.T, ss store.Store) {
 	r1 := (<-ss.Post().GetOldest()).Data.(*model.Post)
 
 	assert.EqualValues(t, o2.Id, r1.Id)
+}
+
+func testGetMaxPostSize(t *testing.T, ss store.Store) {
+	assert.Equal(t, model.POST_MESSAGE_MAX_RUNES_V2, (<-ss.Post().GetMaxPostSize()).Data.(int))
+	assert.Equal(t, model.POST_MESSAGE_MAX_RUNES_V2, (<-ss.Post().GetMaxPostSize()).Data.(int))
 }

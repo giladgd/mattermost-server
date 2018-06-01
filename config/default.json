@@ -1,6 +1,7 @@
 {
     "ServiceSettings": {
-        "SiteURL": "http://localhost:8065",
+        "SiteURL": "",
+        "WebsocketURL": "",
         "LicenseFileLocation": "",
         "ListenAddress": ":8065",
         "ConnectionSecurity": "",
@@ -21,7 +22,7 @@
         "EnableOnlyAdminIntegrations": true,
         "EnablePostUsernameOverride": false,
         "EnablePostIconOverride": false,
-        "EnableAPIv3": true,
+        "EnableAPIv3": false,
         "EnableLinkPreviews": false,
         "EnableTesting": false,
         "EnableDeveloper": false,
@@ -32,6 +33,7 @@
         "EnforceMultifactorAuthentication": false,
         "EnableUserAccessTokens": false,
         "AllowCorsFrom": "",
+        "AllowCookiesForSubdomains": false,
         "SessionLengthWebInDays": 30,
         "SessionLengthMobileInDays": 30,
         "SessionLengthSSOInDays": 30,
@@ -45,14 +47,23 @@
         "RestrictCustomEmojiCreation": "all",
         "RestrictPostDelete": "all",
         "AllowEditPost": "always",
-        "PostEditTimeLimit": 300,
+        "PostEditTimeLimit": -1,
+        "ExperimentalEnableAuthenticationTransfer": true,
         "TimeBetweenUserTypingUpdatesMilliseconds": 5000,
         "EnablePostSearch": true,
         "EnableUserTypingMessages": true,
         "EnableChannelViewedMessages": true,
         "EnableUserStatuses": true,
         "ClusterLogTimeoutMilliseconds": 2000,
-        "EnablePreviewFeatures": true
+        "EnablePreviewFeatures": true,
+        "CloseUnusedDirectMessages": false,
+        "EnableTutorial": true,
+        "ExperimentalEnableDefaultChannelLeaveJoinMessages": true,
+        "ExperimentalGroupUnreadChannels": "disabled",
+        "ImageProxyType": "",
+        "ImageProxyOptions": "",
+        "ImageProxyURL": "",
+        "EnableAPITeamDeletion": false
     },
     "TeamSettings": {
         "SiteName": "Mattermost",
@@ -60,6 +71,7 @@
         "EnableTeamCreation": true,
         "EnableUserCreation": true,
         "EnableOpenServer": false,
+        "EnableUserDeactivation": false,
         "RestrictCreationToDomains": "",
         "EnableCustomBrand": false,
         "CustomBrandText": "",
@@ -79,7 +91,14 @@
         "MaxNotificationsPerChannel": 1000,
         "EnableConfirmNotificationsToChannel": true,
         "TeammateNameDisplay": "username",
-        "ExperimentalTownSquareIsReadOnly": false
+        "ExperimentalEnableAutomaticReplies": false,
+        "ExperimentalHideTownSquareinLHS": false,
+        "ExperimentalTownSquareIsReadOnly": false,
+        "ExperimentalPrimaryTeam": ""
+    },
+    "DisplaySettings": {
+        "CustomUrlSchemes": [],
+        "ExperimentalTimezone": false
     },
     "ClientRequirements": {
         "AndroidLatestVersion": "",
@@ -103,9 +122,10 @@
     "LogSettings": {
         "EnableConsole": true,
         "ConsoleLevel": "DEBUG",
+        "ConsoleJson": true,
         "EnableFile": true,
         "FileLevel": "INFO",
-        "FileFormat": "",
+        "FileJson": true,
         "FileLocation": "",
         "EnableWebhookDebugging": true,
         "EnableDiagnostics": true
@@ -130,7 +150,7 @@
         "AmazonS3AccessKeyId": "",
         "AmazonS3SecretAccessKey": "",
         "AmazonS3Bucket": "",
-        "AmazonS3Region": "us-east-1",
+        "AmazonS3Region": "",
         "AmazonS3Endpoint": "s3.amazonaws.com",
         "AmazonS3SSL": true,
         "AmazonS3SignV2": false,
@@ -142,6 +162,7 @@
         "EnableSignInWithEmail": true,
         "EnableSignInWithUsername": true,
         "SendEmailNotifications": true,
+        "UseChannelInEmailNotifications": false,
         "RequireEmailVerification": false,
         "FeedbackName": "",
         "FeedbackEmail": "test@example.com",
@@ -159,8 +180,12 @@
         "EnableEmailBatching": false,
         "EmailBatchingBufferSize": 256,
         "EmailBatchingInterval": 30,
+        "EnablePreviewModeBanner": true,
         "SkipServerCertificateVerification": false,
-        "EmailNotificationContentsType": "full"
+        "EmailNotificationContentsType": "full",
+        "LoginButtonColor": "",
+        "LoginButtonBorderColor": "",
+        "LoginButtonTextColor": ""
     },
     "RateLimitSettings": {
         "Enable": false,
@@ -168,6 +193,7 @@
         "MaxBurst": 100,
         "MemoryStoreSize": 10000,
         "VaryByRemoteAddr": true,
+        "VaryByUser": false,
         "VaryByHeader": ""
     },
     "PrivacySettings": {
@@ -194,6 +220,9 @@
         "DefaultTheme": "default",
         "AllowCustomThemes": true,
         "AllowedThemes": []
+    },
+    "TimezoneSettings": {
+        "SupportedTimezonesPath": "timezones.json"
     },
     "GitLabSettings": {
         "Enable": false,
@@ -239,11 +268,15 @@
         "NicknameAttribute": "",
         "IdAttribute": "",
         "PositionAttribute": "",
+        "LoginIdAttribute": "",
         "SyncIntervalMinutes": 60,
         "SkipCertificateVerification": false,
         "QueryTimeout": 60,
         "MaxPageSize": 0,
-        "LoginFieldName": ""
+        "LoginFieldName": "",
+        "LoginButtonColor": "",
+        "LoginButtonBorderColor": "",
+        "LoginButtonTextColor": ""
     },
     "ComplianceSettings": {
         "Enable": false,
@@ -263,6 +296,8 @@
         "IdpUrl": "",
         "IdpDescriptorUrl": "",
         "AssertionConsumerServiceURL": "",
+        "ScopingIDPProviderId": "",
+        "ScopingIDPName": "",
         "IdpCertificateFile": "",
         "PublicCertificateFile": "",
         "PrivateKeyFile": "",
@@ -273,7 +308,10 @@
         "NicknameAttribute": "",
         "LocaleAttribute": "",
         "PositionAttribute": "",
-        "LoginButtonText": "With SAML"
+        "LoginButtonText": "With SAML",
+        "LoginButtonColor": "",
+        "LoginButtonBorderColor": "",
+        "LoginButtonTextColor": ""
     },
     "NativeAppSettings": {
         "AppDownloadLink": "https://about.mattermost.com/downloads/",
@@ -288,7 +326,10 @@
         "UseExperimentalGossip": false,
         "ReadOnlyConfig": true,
         "GossipPort": 8074,
-        "StreamingPort": 8075
+        "StreamingPort": 8075,
+        "MaxIdleConns": 100,
+        "MaxIdleConnsPerHost": 128,
+        "IdleConnTimeoutMilliseconds": 90000
     },
     "MetricsSettings": {
         "Enable": false,
@@ -331,6 +372,19 @@
         "FileRetentionDays": 365,
         "DeletionJobStartTime": "02:00"
     },
+    "MessageExportSettings": {
+        "EnableExport": false,
+        "DailyRunTime": "01:00",
+        "ExportFromTimestamp": 0,
+        "FileLocation": "export",
+        "BatchSize": 10000,
+        "GlobalRelaySettings": {
+            "CustomerType": "A9",
+            "SmtpUsername": "",
+            "SmtpPassword": "",
+            "EmailAddress": ""
+        }
+    },
     "JobSettings": {
         "RunJobs": true,
         "RunScheduler": true
@@ -339,6 +393,7 @@
         "Enable": true,
         "EnableUploads": false,
         "Directory": "./plugins",
+        "ClientDirectory": "./client/plugins",
         "Plugins": {},
         "PluginStates": {}
     }

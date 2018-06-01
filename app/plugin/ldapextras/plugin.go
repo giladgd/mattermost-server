@@ -8,12 +8,11 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	l4g "github.com/alecthomas/log4go"
 	"github.com/gorilla/mux"
 
 	"github.com/mattermost/mattermost-server/app/plugin"
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 type Plugin struct {
@@ -35,7 +34,7 @@ func (p *Plugin) config() *Configuration {
 func (p *Plugin) OnConfigurationChange() {
 	var configuration Configuration
 	if err := p.api.LoadPluginConfiguration(&configuration); err != nil {
-		l4g.Error(err.Error())
+		mlog.Error(err.Error())
 	}
 	p.configuration.Store(&configuration)
 }
@@ -65,7 +64,6 @@ func (p *Plugin) handleGetAttributes(w http.ResponseWriter, r *http.Request) {
 
 	attributes, err := p.api.GetLdapUserAttributes(id, config.Attributes)
 	if err != nil {
-		err.Translate(utils.T)
 		http.Error(w, fmt.Sprintf("Errored getting attributes: %v", err.Error()), http.StatusInternalServerError)
 	}
 

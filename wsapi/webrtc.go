@@ -4,14 +4,10 @@
 package wsapi
 
 import (
-	l4g "github.com/alecthomas/log4go"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 func (api *API) InitWebrtc() {
-	l4g.Debug(utils.T("wsapi.webtrc.init.debug"))
-
 	api.Router.Handle("webrtc", api.ApiWebSocketHandler(api.webrtcMessage))
 }
 
@@ -24,7 +20,7 @@ func (api *API) webrtcMessage(req *model.WebSocketRequest) (map[string]interface
 
 	event := model.NewWebSocketEvent(model.WEBSOCKET_EVENT_WEBRTC, "", "", toUserId, nil)
 	event.Data = req.Data
-	go api.App.Publish(event)
+	api.App.Publish(event)
 
 	return nil, nil
 }

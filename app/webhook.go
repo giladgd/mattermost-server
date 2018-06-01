@@ -4,13 +4,14 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 
-	l4g "github.com/alecthomas/log4go"
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/store"
 	"github.com/mattermost/mattermost-server/utils"
@@ -106,20 +107,35 @@ func (a *App) TriggerWebhook(payload *model.OutgoingWebhookPayload, hook *model.
 				req, _ := http.NewRequest("POST", url, body)
 				req.Header.Set("Content-Type", contentType)
 				req.Header.Set("Accept", "application/json")
-				if resp, err := utils.HttpClient(false).Do(req); err != nil {
-					l4g.Error(utils.T("api.post.handle_webhook_events_and_forget.event_post.error"), err.Error())
+				if resp, err := a.HTTPClient(false).Do(req); err != nil {
+					mlog.Error(fmt.Sprintf("Event POST failed, err=%s", err.Error()))
 				} else {
 					defer consumeAndClose(resp)
 
 					webhookResp := model.OutgoingWebhookResponseFromJson(resp.Body)
 
-					if webhookResp != nil && webhookResp.Text != nil {
+					if webhookResp != nil && (webhookResp.Text != nil || len(webhookResp.Attachments) > 0) {
 						postRootId := ""
 						if webhookResp.ResponseType == model.OUTGOING_HOOK_RESPONSE_TYPE_COMMENT {
 							postRootId = post.Id
 						}
-						if _, err := a.CreateWebhookPost(hook.CreatorId, channel, *webhookResp.Text, webhookResp.Username, webhookResp.IconURL, webhookResp.Props, webhookResp.Type, postRootId); err != nil {
-							l4g.Error(utils.T("api.post.handle_webhook_events_and_forget.create_post.error"), err)
+						if len(webhookResp.Props) == 0 {
+							webhookResp.Props = make(model.StringInterface)
+						}
+						webhookResp.Props["webhook_display_name"] = hook.DisplayName
+
+						text := ""
+						if webhookResp.Text != nil {
+							text = a.ProcessSlackText(*webhookResp.Text)
+						}
+						webhookResp.Attachments = a.ProcessSlackAttachments(webhookResp.Attachments)
+						// attachments is in here for slack compatibility
+						if len(webhookResp.Attachments) > 0 {
+							webhookResp.Props["attachments"] = webhookResp.Attachments
+						}
+
+						if _, err := a.CreateWebhookPost(hook.CreatorId, channel, text, webhookResp.Username, webhookResp.IconURL, webhookResp.Props, webhookResp.Type, postRootId); err != nil {
+							mlog.Error(fmt.Sprintf("Failed to create response post, err=%v", err))
 						}
 					}
 				}
@@ -128,7 +144,7 @@ func (a *App) TriggerWebhook(payload *model.OutgoingWebhookPayload, hook *model.
 	}
 }
 
-func SplitWebhookPost(post *model.Post) ([]*model.Post, *model.AppError) {
+func SplitWebhookPost(post *model.Post, maxPostSize int) ([]*model.Post, *model.AppError) {
 	splits := make([]*model.Post, 0)
 	remainingText := post.Message
 
@@ -144,12 +160,12 @@ func SplitWebhookPost(post *model.Post) ([]*model.Post, *model.AppError) {
 		return nil, model.NewAppError("SplitWebhookPost", "web.incoming_webhook.split_props_length.app_error", map[string]interface{}{"Max": model.POST_PROPS_MAX_USER_RUNES}, "", http.StatusBadRequest)
 	}
 
-	for utf8.RuneCountInString(remainingText) > model.POST_MESSAGE_MAX_RUNES {
+	for utf8.RuneCountInString(remainingText) > maxPostSize {
 		split := base
 		x := 0
 		for index := range remainingText {
 			x++
-			if x > model.POST_MESSAGE_MAX_RUNES {
+			if x > maxPostSize {
 				split.Message = remainingText[:index]
 				remainingText = remainingText[index:]
 				break
@@ -210,7 +226,7 @@ func SplitWebhookPost(post *model.Post) ([]*model.Post, *model.AppError) {
 
 func (a *App) CreateWebhookPost(userId string, channel *model.Channel, text, overrideUsername, overrideIconUrl string, props model.StringInterface, postType string, postRootId string) (*model.Post, *model.AppError) {
 	// parse links into Markdown format
-	linkWithTextRegex := regexp.MustCompile(`<([^<\|]+)\|([^>]+)>`)
+	linkWithTextRegex := regexp.MustCompile(`<([^\n<\|>]+)\|([^\n>]+)>`)
 	text = linkWithTextRegex.ReplaceAllString(text, "[${2}](${1})")
 
 	post := &model.Post{UserId: userId, ChannelId: channel.Id, Message: text, Type: postType, RootId: postRootId}
@@ -251,7 +267,7 @@ func (a *App) CreateWebhookPost(userId string, channel *model.Channel, text, ove
 		}
 	}
 
-	splits, err := SplitWebhookPost(post)
+	splits, err := SplitWebhookPost(post, a.MaxPostSize())
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +289,17 @@ func (a *App) CreateIncomingWebhookForChannel(creatorId string, channel *model.C
 	hook.UserId = creatorId
 	hook.TeamId = channel.TeamId
 
+	if !a.Config().ServiceSettings.EnablePostUsernameOverride {
+		hook.Username = ""
+	}
+	if !a.Config().ServiceSettings.EnablePostIconOverride {
+		hook.IconURL = ""
+	}
+
+	if hook.Username != "" && !model.IsValidUsername(hook.Username) {
+		return nil, model.NewAppError("CreateIncomingWebhookForChannel", "api.incoming_webhook.invalid_username.app_error", nil, "", http.StatusBadRequest)
+	}
+
 	if result := <-a.Srv.Store.Webhook().SaveIncoming(hook); result.Err != nil {
 		return nil, result.Err
 	} else {
@@ -283,6 +310,17 @@ func (a *App) CreateIncomingWebhookForChannel(creatorId string, channel *model.C
 func (a *App) UpdateIncomingWebhook(oldHook, updatedHook *model.IncomingWebhook) (*model.IncomingWebhook, *model.AppError) {
 	if !a.Config().ServiceSettings.EnableIncomingWebhooks {
 		return nil, model.NewAppError("UpdateIncomingWebhook", "api.incoming_webhook.disabled.app_error", nil, "", http.StatusNotImplemented)
+	}
+
+	if !a.Config().ServiceSettings.EnablePostUsernameOverride {
+		updatedHook.Username = oldHook.Username
+	}
+	if !a.Config().ServiceSettings.EnablePostIconOverride {
+		updatedHook.IconURL = oldHook.IconURL
+	}
+
+	if updatedHook.Username != "" && !model.IsValidUsername(updatedHook.Username) {
+		return nil, model.NewAppError("UpdateIncomingWebhook", "api.incoming_webhook.invalid_username.app_error", nil, "", http.StatusBadRequest)
 	}
 
 	updatedHook.Id = oldHook.Id
@@ -542,23 +580,25 @@ func (a *App) HandleIncomingWebhook(hookId string, req *model.IncomingWebhookReq
 	channelName := req.ChannelName
 	webhookType := req.Type
 
-	text = a.ProcessSlackText(text)
-	req.Attachments = a.ProcessSlackAttachments(req.Attachments)
-
-	// attachments is in here for slack compatibility
-	if len(req.Attachments) > 0 {
-		if len(req.Props) == 0 {
-			req.Props = make(model.StringInterface)
-		}
-		req.Props["attachments"] = req.Attachments
-		webhookType = model.POST_SLACK_ATTACHMENT
-	}
-
 	var hook *model.IncomingWebhook
 	if result := <-hchan; result.Err != nil {
 		return model.NewAppError("HandleIncomingWebhook", "web.incoming_webhook.invalid.app_error", nil, "err="+result.Err.Message, http.StatusBadRequest)
 	} else {
 		hook = result.Data.(*model.IncomingWebhook)
+	}
+
+	if len(req.Props) == 0 {
+		req.Props = make(model.StringInterface)
+	}
+
+	req.Props["webhook_display_name"] = hook.DisplayName
+
+	text = a.ProcessSlackText(text)
+	req.Attachments = a.ProcessSlackAttachments(req.Attachments)
+	// attachments is in here for slack compatibility
+	if len(req.Attachments) > 0 {
+		req.Props["attachments"] = req.Attachments
+		webhookType = model.POST_SLACK_ATTACHMENT
 	}
 
 	var channel *model.Channel
@@ -593,7 +633,11 @@ func (a *App) HandleIncomingWebhook(hookId string, req *model.IncomingWebhookReq
 		}
 	}
 
-	if utils.IsLicensed() && *a.Config().TeamSettings.ExperimentalTownSquareIsReadOnly &&
+	if hook.ChannelLocked && hook.ChannelId != channel.Id {
+		return model.NewAppError("HandleIncomingWebhook", "web.incoming_webhook.channel_locked.app_error", nil, "", http.StatusForbidden)
+	}
+
+	if a.License() != nil && *a.Config().TeamSettings.ExperimentalTownSquareIsReadOnly &&
 		channel.Name == model.DEFAULT_CHANNEL {
 		return model.NewAppError("HandleIncomingWebhook", "api.post.create_post.town_square_read_only", nil, "", http.StatusForbidden)
 	}
@@ -602,8 +646,15 @@ func (a *App) HandleIncomingWebhook(hookId string, req *model.IncomingWebhookReq
 		return model.NewAppError("HandleIncomingWebhook", "web.incoming_webhook.permissions.app_error", nil, "", http.StatusForbidden)
 	}
 
-	overrideUsername := req.Username
-	overrideIconUrl := req.IconURL
+	overrideUsername := hook.Username
+	if req.Username != "" {
+		overrideUsername = req.Username
+	}
+
+	overrideIconUrl := hook.IconURL
+	if req.IconURL != "" {
+		overrideIconUrl = req.IconURL
+	}
 
 	_, err := a.CreateWebhookPost(hook.UserId, channel, text, overrideUsername, overrideIconUrl, req.Props, webhookType, "")
 	return err

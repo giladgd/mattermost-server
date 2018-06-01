@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/utils"
 )
@@ -21,6 +23,8 @@ func TestSendNotifications(t *testing.T) {
 		UserId:    th.BasicUser.Id,
 		ChannelId: th.BasicChannel.Id,
 		Message:   "@" + th.BasicUser2.Username,
+		Type:      model.POST_ADD_TO_CHANNEL,
+		Props:     map[string]interface{}{model.POST_PROPS_ADDED_USER_ID: "junk"},
 	}, true)
 
 	if err != nil {
@@ -33,7 +37,7 @@ func TestSendNotifications(t *testing.T) {
 	} else if mentions == nil {
 		t.Log(mentions)
 		t.Fatal("user should have been mentioned")
-	} else if mentions[0] != th.BasicUser2.Id {
+	} else if !utils.StringInSlice(th.BasicUser2.Id, mentions) {
 		t.Log(mentions)
 		t.Fatal("user should have been mentioned")
 	}
@@ -82,147 +86,392 @@ func TestGetExplicitMentions(t *testing.T) {
 	id2 := model.NewId()
 	id3 := model.NewId()
 
-	// not mentioning anybody
-	message := "this is a message"
-	keywords := map[string][]string{}
-	if mentions, potential, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 0 || len(potential) != 0 {
-		t.Fatal("shouldn't have mentioned anybody or have any potencial mentions")
-	}
+	for name, tc := range map[string]struct {
+		Message  string
+		Keywords map[string][]string
+		Expected *ExplicitMentions
+	}{
+		"Nobody": {
+			Message:  "this is a message",
+			Keywords: map[string][]string{},
+			Expected: &ExplicitMentions{},
+		},
+		"NonexistentUser": {
+			Message: "this is a message for @user",
+			Expected: &ExplicitMentions{
+				OtherPotentialMentions: []string{"user"},
+			},
+		},
+		"OnePerson": {
+			Message:  "this is a message for @user",
+			Keywords: map[string][]string{"@user": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"OnePersonWithPeriodAtEndOfUsername": {
+			Message:  "this is a message for @user.name.",
+			Keywords: map[string][]string{"@user.name.": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"OnePersonWithPeriodAtEndOfUsernameButNotSimilarName": {
+			Message:  "this is a message for @user.name.",
+			Keywords: map[string][]string{"@user.name.": {id1}, "@user.name": {id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"OnePersonAtEndOfSentence": {
+			Message:  "this is a message for @user.",
+			Keywords: map[string][]string{"@user": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"OnePersonWithoutAtMention": {
+			Message:  "this is a message for @user",
+			Keywords: map[string][]string{"this": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+				OtherPotentialMentions: []string{"user"},
+			},
+		},
+		"OnePersonWithColonAtEnd": {
+			Message:  "this is a message for @user:",
+			Keywords: map[string][]string{"this": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+				OtherPotentialMentions: []string{"user"},
+			},
+		},
+		"MultiplePeopleWithOneWord": {
+			Message:  "this is a message for @user",
+			Keywords: map[string][]string{"@user": {id1, id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+				},
+			},
+		},
+		"OneOfMultiplePeople": {
+			Message:  "this is a message for @user",
+			Keywords: map[string][]string{"@user": {id1}, "@mention": {id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"MultiplePeopleWithMultipleWords": {
+			Message:  "this is an @mention for @user",
+			Keywords: map[string][]string{"@user": {id1}, "@mention": {id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+				},
+			},
+		},
+		"Channel": {
+			Message:  "this is an message for @channel",
+			Keywords: map[string][]string{"@channel": {id1, id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+				},
+				ChannelMentioned: true,
+			},
+		},
 
-	// mentioning a user that doesn't exist
-	message = "this is a message for @user"
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 0 {
-		t.Fatal("shouldn't have mentioned user that doesn't exist")
-	}
+		"ChannelWithColonAtEnd": {
+			Message:  "this is a message for @channel:",
+			Keywords: map[string][]string{"@channel": {id1, id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+				},
+				ChannelMentioned: true,
+			},
+		},
+		"CapitalizedChannel": {
+			Message:  "this is an message for @cHaNNeL",
+			Keywords: map[string][]string{"@channel": {id1, id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+				},
+				ChannelMentioned: true,
+			},
+		},
+		"All": {
+			Message:  "this is an message for @all",
+			Keywords: map[string][]string{"@all": {id1, id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+				},
+				AllMentioned: true,
+			},
+		},
+		"AllWithColonAtEnd": {
+			Message:  "this is a message for @all:",
+			Keywords: map[string][]string{"@all": {id1, id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+				},
+				AllMentioned: true,
+			},
+		},
+		"CapitalizedAll": {
+			Message:  "this is an message for @ALL",
+			Keywords: map[string][]string{"@all": {id1, id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+				},
+				AllMentioned: true,
+			},
+		},
+		"UserWithPeriod": {
+			Message:  "user.period doesn't complicate things at all by including periods in their username",
+			Keywords: map[string][]string{"user.period": {id1}, "user": {id2}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"AtUserWithColonAtEnd": {
+			Message:  "this is a message for @user:",
+			Keywords: map[string][]string{"@user": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"AtUserWithPeriodAtEndOfSentence": {
+			Message:  "this is a message for @user.period.",
+			Keywords: map[string][]string{"@user.period": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"UserWithPeriodAtEndOfSentence": {
+			Message:  "this is a message for user.period.",
+			Keywords: map[string][]string{"user.period": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"UserWithColonAtEnd": {
+			Message:  "this is a message for user:",
+			Keywords: map[string][]string{"user": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"PotentialOutOfChannelUser": {
+			Message:  "this is an message for @potential and @user",
+			Keywords: map[string][]string{"@user": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+				OtherPotentialMentions: []string{"potential"},
+			},
+		},
+		"PotentialOutOfChannelUserWithPeriod": {
+			Message: "this is an message for @potential.user",
+			Expected: &ExplicitMentions{
+				OtherPotentialMentions: []string{"potential.user"},
+			},
+		},
+		"InlineCode": {
+			Message:  "`this shouldn't mention @channel at all`",
+			Keywords: map[string][]string{},
+			Expected: &ExplicitMentions{},
+		},
+		"FencedCodeBlock": {
+			Message:  "```\nthis shouldn't mention @channel at all\n```",
+			Keywords: map[string][]string{},
+			Expected: &ExplicitMentions{},
+		},
+		"Emphasis": {
+			Message:  "*@aaa @bbb @ccc*",
+			Keywords: map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+					id3: true,
+				},
+			},
+		},
+		"StrongEmphasis": {
+			Message:  "**@aaa @bbb @ccc**",
+			Keywords: map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+					id3: true,
+				},
+			},
+		},
+		"Strikethrough": {
+			Message:  "~~@aaa @bbb @ccc~~",
+			Keywords: map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+					id2: true,
+					id3: true,
+				},
+			},
+		},
+		"Heading": {
+			Message:  "### @aaa",
+			Keywords: map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"BlockQuote": {
+			Message:  "> @aaa",
+			Keywords: map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"Emoji": {
+			Message:  ":smile:",
+			Keywords: map[string][]string{"smile": {id1}, "smiley": {id2}, "smiley_cat": {id3}},
+			Expected: &ExplicitMentions{},
+		},
+		"NotEmoji": {
+			Message:  "smile",
+			Keywords: map[string][]string{"smile": {id1}, "smiley": {id2}, "smiley_cat": {id3}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"UnclosedEmoji": {
+			Message:  ":smile",
+			Keywords: map[string][]string{"smile": {id1}, "smiley": {id2}, "smiley_cat": {id3}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"UnopenedEmoji": {
+			Message:  "smile:",
+			Keywords: map[string][]string{"smile": {id1}, "smiley": {id2}, "smiley_cat": {id3}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"IndentedCodeBlock": {
+			Message:  "    this shouldn't mention @channel at all",
+			Keywords: map[string][]string{},
+			Expected: &ExplicitMentions{},
+		},
+		"LinkTitle": {
+			Message:  `[foo](this "shouldn't mention @channel at all")`,
+			Keywords: map[string][]string{},
+			Expected: &ExplicitMentions{},
+		},
+		"MalformedInlineCode": {
+			Message:  "`this should mention @channel``",
+			Keywords: map[string][]string{},
+			Expected: &ExplicitMentions{
+				ChannelMentioned: true,
+			},
+		},
 
-	// mentioning one person
-	keywords = map[string][]string{"@user": {id1}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] {
-		t.Fatal("should've mentioned @user")
-	}
-
-	// mentioning one person without an @mention
-	message = "this is a message for @user"
-	keywords = map[string][]string{"this": {id1}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] {
-		t.Fatal("should've mentioned this")
-	}
-
-	// mentioning multiple people with one word
-	message = "this is a message for @user"
-	keywords = map[string][]string{"@user": {id1, id2}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 2 || !mentions[id1] || !mentions[id2] {
-		t.Fatal("should've mentioned two users with @user")
-	}
-
-	// mentioning only one of multiple people
-	keywords = map[string][]string{"@user": {id1}, "@mention": {id2}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] || mentions[id2] {
-		t.Fatal("should've mentioned @user and not @mention")
-	}
-
-	// mentioning multiple people with multiple words
-	message = "this is an @mention for @user"
-	keywords = map[string][]string{"@user": {id1}, "@mention": {id2}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 2 || !mentions[id1] || !mentions[id2] {
-		t.Fatal("should've mentioned two users with @user and @mention")
-	}
-
-	// mentioning @channel (not a special case, but it's good to double check)
-	message = "this is an message for @channel"
-	keywords = map[string][]string{"@channel": {id1, id2}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 2 || !mentions[id1] || !mentions[id2] {
-		t.Fatal("should've mentioned two users with @channel")
-	}
-
-	// mentioning @all (not a special case, but it's good to double check)
-	message = "this is an message for @all"
-	keywords = map[string][]string{"@all": {id1, id2}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 2 || !mentions[id1] || !mentions[id2] {
-		t.Fatal("should've mentioned two users with @all")
-	}
-
-	// mentioning user.period without mentioning user (PLT-3222)
-	message = "user.period doesn't complicate things at all by including periods in their username"
-	keywords = map[string][]string{"user.period": {id1}, "user": {id2}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] || mentions[id2] {
-		t.Fatal("should've mentioned user.period and not user")
-	}
-
-	// mentioning a potential out of channel user
-	message = "this is an message for @potential and @user"
-	keywords = map[string][]string{"@user": {id1}}
-	if mentions, potential, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] || len(potential) != 1 {
-		t.Fatal("should've mentioned user and have a potential not in channel")
-	}
-
-	// words in inline code shouldn't trigger mentions
-	message = "`this shouldn't mention @channel at all`"
-	keywords = map[string][]string{}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 0 {
-		t.Fatal("@channel in inline code shouldn't cause a mention")
-	}
-
-	// words in code blocks shouldn't trigger mentions
-	message = "```\nthis shouldn't mention @channel at all\n```"
-	keywords = map[string][]string{}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 0 {
-		t.Fatal("@channel in code block shouldn't cause a mention")
-	}
-
-	// Markdown-formatted text that isn't code should trigger mentions
-	message = "*@aaa @bbb @ccc*"
-	keywords = map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 3 || !mentions[id1] || !mentions[id2] || !mentions[id3] {
-		t.Fatal("should've mentioned all 3 users", mentions)
-	}
-
-	message = "**@aaa @bbb @ccc**"
-	keywords = map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 3 || !mentions[id1] || !mentions[id2] || !mentions[id3] {
-		t.Fatal("should've mentioned all 3 users")
-	}
-
-	message = "~~@aaa @bbb @ccc~~"
-	keywords = map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 3 || !mentions[id1] || !mentions[id2] || !mentions[id3] {
-		t.Fatal("should've mentioned all 3 users")
-	}
-
-	message = "### @aaa"
-	keywords = map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] || mentions[id2] || mentions[id3] {
-		t.Fatal("should've only mentioned aaa")
-	}
-
-	message = "> @aaa"
-	keywords = map[string][]string{"@aaa": {id1}, "@bbb": {id2}, "@ccc": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] || mentions[id2] || mentions[id3] {
-		t.Fatal("should've only mentioned aaa")
-	}
-
-	message = ":smile:"
-	keywords = map[string][]string{"smile": {id1}, "smiley": {id2}, "smiley_cat": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) == 1 || mentions[id1] {
-		t.Fatal("should not mentioned smile")
-	}
-
-	message = "smile"
-	keywords = map[string][]string{"smile": {id1}, "smiley": {id2}, "smiley_cat": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] || mentions[id2] || mentions[id3] {
-		t.Fatal("should've only mentioned smile")
-	}
-
-	message = ":smile"
-	keywords = map[string][]string{"smile": {id1}, "smiley": {id2}, "smiley_cat": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] || mentions[id2] || mentions[id3] {
-		t.Fatal("should've only mentioned smile")
-	}
-
-	message = "smile:"
-	keywords = map[string][]string{"smile": {id1}, "smiley": {id2}, "smiley_cat": {id3}}
-	if mentions, _, _, _, _ := GetExplicitMentions(message, keywords); len(mentions) != 1 || !mentions[id1] || mentions[id2] || mentions[id3] {
-		t.Fatal("should've only mentioned smile")
+		// The following tests cover cases where the message mentions @user.name, so we shouldn't assume that
+		// the user might be intending to mention some @user that isn't in the channel.
+		"Don't include potential mention that's part of an actual mention (without trailing period)": {
+			Message:  "this is an message for @user.name",
+			Keywords: map[string][]string{"@user.name": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"Don't include potential mention that's part of an actual mention (with trailing period)": {
+			Message:  "this is an message for @user.name.",
+			Keywords: map[string][]string{"@user.name": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"Don't include potential mention that's part of an actual mention (with multiple trailing periods)": {
+			Message:  "this is an message for @user.name...",
+			Keywords: map[string][]string{"@user.name": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+		"Don't include potential mention that's part of an actual mention (containing and followed by multiple periods)": {
+			Message:  "this is an message for @user...name...",
+			Keywords: map[string][]string{"@user...name": {id1}},
+			Expected: &ExplicitMentions{
+				MentionedUserIds: map[string]bool{
+					id1: true,
+				},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := GetExplicitMentions(tc.Message, tc.Keywords)
+			if tc.Expected.MentionedUserIds == nil {
+				tc.Expected.MentionedUserIds = make(map[string]bool)
+			}
+			assert.EqualValues(t, tc.Expected, m)
+		})
 	}
 }
 
@@ -254,6 +503,7 @@ func TestGetExplicitMentionsAtHere(t *testing.T) {
 		"\\@here\\": true,
 		"|@here|":   true,
 		";@here;":   true,
+		"@here:":    true,
 		":@here:":   false, // This case shouldn't trigger a mention since it follows the format of reactions e.g. :word:
 		"'@here'":   true,
 		"\"@here\"": true,
@@ -265,170 +515,26 @@ func TestGetExplicitMentionsAtHere(t *testing.T) {
 		"?@here?":   true,
 		"`@here`":   false, // This case shouldn't mention since it's a code block
 		"~@here~":   true,
+		"@HERE":     true,
+		"@hERe":     true,
 	}
 
 	for message, shouldMention := range cases {
-		if _, _, hereMentioned, _, _ := GetExplicitMentions(message, nil); hereMentioned && !shouldMention {
+		if m := GetExplicitMentions(message, nil); m.HereMentioned && !shouldMention {
 			t.Fatalf("shouldn't have mentioned @here with \"%v\"", message)
-		} else if !hereMentioned && shouldMention {
-			t.Fatalf("should've have mentioned @here with \"%v\"", message)
+		} else if !m.HereMentioned && shouldMention {
+			t.Fatalf("should've mentioned @here with \"%v\"", message)
 		}
 	}
 
 	// mentioning @here and someone
 	id := model.NewId()
-	if mentions, potential, hereMentioned, _, _ := GetExplicitMentions("@here @user @potential", map[string][]string{"@user": {id}}); !hereMentioned {
+	if m := GetExplicitMentions("@here @user @potential", map[string][]string{"@user": {id}}); !m.HereMentioned {
 		t.Fatal("should've mentioned @here with \"@here @user\"")
-	} else if len(mentions) != 1 || !mentions[id] {
+	} else if len(m.MentionedUserIds) != 1 || !m.MentionedUserIds[id] {
 		t.Fatal("should've mentioned @user with \"@here @user\"")
-	} else if len(potential) > 1 {
+	} else if len(m.OtherPotentialMentions) > 1 {
 		t.Fatal("should've potential mentions for @potential")
-	}
-}
-
-func TestRemoveCodeFromMessage(t *testing.T) {
-	input := "this is regular text"
-	expected := input
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is text with\n```\na code block\n```\nin it"
-	expected = "this is text with\n\nin it"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is text with\n```javascript\na JS code block\n```\nin it"
-	expected = "this is text with\n\nin it"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is text with\n```java script?\na JS code block\n```\nin it"
-	expected = "this is text with\n\nin it"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is text with an empty\n```\n\n\n\n```\nin it"
-	expected = "this is text with an empty\n\nin it"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is text with\n```\ntwo\n```\ncode\n```\nblocks\n```\nin it"
-	expected = "this is text with\n\ncode\n\nin it"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is text with indented\n  ```\ncode\n  ```\nin it"
-	expected = "this is text with indented\n\nin it"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is text ending with\n```\nan unfinished code block"
-	expected = "this is text ending with\n"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `code` in a sentence"
-	expected = "this is   in a sentence"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `two` things of `code` in a sentence"
-	expected = "this is   things of   in a sentence"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `code with spaces` in a sentence"
-	expected = "this is   in a sentence"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `code\nacross multiple` lines"
-	expected = "this is   lines"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `code\non\nmany\ndifferent` lines"
-	expected = "this is   lines"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `\ncode on its own line\n` across multiple lines"
-	expected = "this is   across multiple lines"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `\n    some more code    \n` across multiple lines"
-	expected = "this is   across multiple lines"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `\ncode` on its own line"
-	expected = "this is   on its own line"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `code\n` on its own line"
-	expected = "this is   on its own line"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is *italics mixed with `code in a way that has the code` take precedence*"
-	expected = "this is *italics mixed with   take precedence*"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is code within a wo` `rd for some reason"
-	expected = "this is code within a wo rd for some reason"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `not\n\ncode` because it has a blank line"
-	expected = input
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is `not\n    \ncode` because it has a line with only whitespace"
-	expected = input
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is just `` two backquotes"
-	expected = input
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "these are ``multiple backquotes`` around code"
-	expected = "these are   around code"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
-	}
-
-	input = "this is text with\n~~~\na code block\n~~~\nin it"
-	expected = "this is text with\n\nin it"
-	if actual := removeCodeFromMessage(input); actual != expected {
-		t.Fatalf("received incorrect output\n\nGot:\n%v\n\nExpected:\n%v\n", actual, expected)
 	}
 }
 
@@ -544,7 +650,8 @@ func TestGetMentionKeywords(t *testing.T) {
 		return duplicate_frequency
 	}
 
-	// multiple users
+	// multiple users but no more than MaxNotificationsPerChannel
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.TeamSettings.MaxNotificationsPerChannel = 4 })
 	profiles = map[string]*model.User{
 		user1.Id: user1,
 		user2.Id: user2,
@@ -566,6 +673,19 @@ func TestGetMentionKeywords(t *testing.T) {
 		t.Fatal("should've mentioned user3 and user4 with @channel")
 	} else if ids, ok := mentions["@all"]; !ok || len(ids) != 2 || (ids[0] != user3.Id && ids[1] != user3.Id) || (ids[0] != user4.Id && ids[1] != user4.Id) {
 		t.Fatal("should've mentioned user3 and user4 with @all")
+	}
+
+	// multiple users and more than MaxNotificationsPerChannel
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.TeamSettings.MaxNotificationsPerChannel = 3 })
+	mentions = th.App.GetMentionKeywordsInChannel(profiles, true)
+	if len(mentions) != 4 {
+		t.Fatal("should've returned four mention keywords")
+	} else if _, ok := mentions["@channel"]; ok {
+		t.Fatal("should not have mentioned any user with @channel")
+	} else if _, ok := mentions["@all"]; ok {
+		t.Fatal("should not have mentioned any user with @all")
+	} else if _, ok := mentions["@here"]; ok {
+		t.Fatal("should not have mentioned any user with @here")
 	}
 
 	// no special mentions
@@ -786,6 +906,14 @@ func TestDoesNotifyPropsAllowPushNotification(t *testing.T) {
 	if DoesNotifyPropsAllowPushNotification(user, channelNotifyProps, post, true) {
 		t.Fatal("Should have returned false")
 	}
+
+	// WHEN default is ALL and channel is MUTED
+	userNotifyProps[model.PUSH_NOTIFY_PROP] = model.USER_NOTIFY_ALL
+	user.NotifyProps = userNotifyProps
+	channelNotifyProps[model.MARK_UNREAD_NOTIFY_PROP] = model.CHANNEL_MARK_UNREAD_MENTION
+	if DoesNotifyPropsAllowPushNotification(user, channelNotifyProps, post, false) {
+		t.Fatal("Should have returned false")
+	}
 }
 
 func TestDoesStatusAllowPushNotification(t *testing.T) {
@@ -915,12 +1043,44 @@ func TestGetDirectMessageNotificationEmailSubject(t *testing.T) {
 	th := Setup()
 	defer th.TearDown()
 
-	expectedPrefix := "[http://localhost:8065] New Direct Message from sender on"
+	expectedPrefix := "[http://localhost:8065] New Direct Message from @sender on"
 	post := &model.Post{
 		CreateAt: 1501804801000,
 	}
 	translateFunc := utils.GetUserTranslations("en")
 	subject := getDirectMessageNotificationEmailSubject(post, translateFunc, "http://localhost:8065", "sender")
+	if !strings.HasPrefix(subject, expectedPrefix) {
+		t.Fatal("Expected subject line prefix '" + expectedPrefix + "', got " + subject)
+	}
+}
+
+func TestGetGroupMessageNotificationEmailSubjectFull(t *testing.T) {
+	th := Setup()
+	defer th.TearDown()
+
+	expectedPrefix := "[http://localhost:8065] New Group Message in sender on"
+	post := &model.Post{
+		CreateAt: 1501804801000,
+	}
+	translateFunc := utils.GetUserTranslations("en")
+	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_FULL
+	subject := getGroupMessageNotificationEmailSubject(post, translateFunc, "http://localhost:8065", "sender", emailNotificationContentsType)
+	if !strings.HasPrefix(subject, expectedPrefix) {
+		t.Fatal("Expected subject line prefix '" + expectedPrefix + "', got " + subject)
+	}
+}
+
+func TestGetGroupMessageNotificationEmailSubjectGeneric(t *testing.T) {
+	th := Setup()
+	defer th.TearDown()
+
+	expectedPrefix := "[http://localhost:8065] New Group Message on"
+	post := &model.Post{
+		CreateAt: 1501804801000,
+	}
+	translateFunc := utils.GetUserTranslations("en")
+	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_GENERIC
+	subject := getGroupMessageNotificationEmailSubject(post, translateFunc, "http://localhost:8065", "sender", emailNotificationContentsType)
 	if !strings.HasPrefix(subject, expectedPrefix) {
 		t.Fatal("Expected subject line prefix '" + expectedPrefix + "', got " + subject)
 	}
@@ -953,21 +1113,22 @@ func TestGetNotificationEmailBodyFullNotificationPublicChannel(t *testing.T) {
 		DisplayName: "ChannelName",
 		Type:        model.CHANNEL_OPEN,
 	}
+	channelName := "ChannelName"
 	senderName := "sender"
 	teamName := "team"
 	teamURL := "http://localhost:8065/" + teamName
 	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_FULL
 	translateFunc := utils.GetUserTranslations("en")
 
-	body := th.App.getNotificationEmailBody(recipient, post, channel, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
+	body := th.App.getNotificationEmailBody(recipient, post, channel, channelName, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
 	if !strings.Contains(body, "You have a new notification.") {
 		t.Fatal("Expected email text 'You have a new notification. Got " + body)
 	}
-	if !strings.Contains(body, "CHANNEL: "+channel.DisplayName) {
-		t.Fatal("Expected email text 'CHANNEL: " + channel.DisplayName + "'. Got " + body)
+	if !strings.Contains(body, "Channel: "+channel.DisplayName) {
+		t.Fatal("Expected email text 'Channel: " + channel.DisplayName + "'. Got " + body)
 	}
-	if !strings.Contains(body, senderName+" - ") {
-		t.Fatal("Expected email text '" + senderName + " - '. Got " + body)
+	if !strings.Contains(body, "@"+senderName+" - ") {
+		t.Fatal("Expected email text '@" + senderName + " - '. Got " + body)
 	}
 	if !strings.Contains(body, post.Message) {
 		t.Fatal("Expected email text '" + post.Message + "'. Got " + body)
@@ -989,21 +1150,22 @@ func TestGetNotificationEmailBodyFullNotificationGroupChannel(t *testing.T) {
 		DisplayName: "ChannelName",
 		Type:        model.CHANNEL_GROUP,
 	}
+	channelName := "ChannelName"
 	senderName := "sender"
 	teamName := "team"
 	teamURL := "http://localhost:8065/" + teamName
 	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_FULL
 	translateFunc := utils.GetUserTranslations("en")
 
-	body := th.App.getNotificationEmailBody(recipient, post, channel, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
-	if !strings.Contains(body, "You have a new notification.") {
-		t.Fatal("Expected email text 'You have a new notification. Got " + body)
+	body := th.App.getNotificationEmailBody(recipient, post, channel, channelName, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
+	if !strings.Contains(body, "You have a new Group Message.") {
+		t.Fatal("Expected email text 'You have a new Group Message. Got " + body)
 	}
-	if !strings.Contains(body, "CHANNEL: Group Message") {
-		t.Fatal("Expected email text 'CHANNEL: Group Message'. Got " + body)
+	if !strings.Contains(body, "Channel: ChannelName") {
+		t.Fatal("Expected email text 'Channel: ChannelName'. Got " + body)
 	}
-	if !strings.Contains(body, senderName+" - ") {
-		t.Fatal("Expected email text '" + senderName + " - '. Got " + body)
+	if !strings.Contains(body, "@"+senderName+" - ") {
+		t.Fatal("Expected email text '@" + senderName + " - '. Got " + body)
 	}
 	if !strings.Contains(body, post.Message) {
 		t.Fatal("Expected email text '" + post.Message + "'. Got " + body)
@@ -1025,21 +1187,22 @@ func TestGetNotificationEmailBodyFullNotificationPrivateChannel(t *testing.T) {
 		DisplayName: "ChannelName",
 		Type:        model.CHANNEL_PRIVATE,
 	}
+	channelName := "ChannelName"
 	senderName := "sender"
 	teamName := "team"
 	teamURL := "http://localhost:8065/" + teamName
 	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_FULL
 	translateFunc := utils.GetUserTranslations("en")
 
-	body := th.App.getNotificationEmailBody(recipient, post, channel, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
+	body := th.App.getNotificationEmailBody(recipient, post, channel, channelName, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
 	if !strings.Contains(body, "You have a new notification.") {
 		t.Fatal("Expected email text 'You have a new notification. Got " + body)
 	}
-	if !strings.Contains(body, "CHANNEL: "+channel.DisplayName) {
-		t.Fatal("Expected email text 'CHANNEL: " + channel.DisplayName + "'. Got " + body)
+	if !strings.Contains(body, "Channel: "+channel.DisplayName) {
+		t.Fatal("Expected email text 'Channel: " + channel.DisplayName + "'. Got " + body)
 	}
-	if !strings.Contains(body, senderName+" - ") {
-		t.Fatal("Expected email text '" + senderName + " - '. Got " + body)
+	if !strings.Contains(body, "@"+senderName+" - ") {
+		t.Fatal("Expected email text '@" + senderName + " - '. Got " + body)
 	}
 	if !strings.Contains(body, post.Message) {
 		t.Fatal("Expected email text '" + post.Message + "'. Got " + body)
@@ -1061,18 +1224,19 @@ func TestGetNotificationEmailBodyFullNotificationDirectChannel(t *testing.T) {
 		DisplayName: "ChannelName",
 		Type:        model.CHANNEL_DIRECT,
 	}
+	channelName := "ChannelName"
 	senderName := "sender"
 	teamName := "team"
 	teamURL := "http://localhost:8065/" + teamName
 	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_FULL
 	translateFunc := utils.GetUserTranslations("en")
 
-	body := th.App.getNotificationEmailBody(recipient, post, channel, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
-	if !strings.Contains(body, "You have a new direct message.") {
-		t.Fatal("Expected email text 'You have a new direct message. Got " + body)
+	body := th.App.getNotificationEmailBody(recipient, post, channel, channelName, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
+	if !strings.Contains(body, "You have a new Direct Message.") {
+		t.Fatal("Expected email text 'You have a new Direct Message. Got " + body)
 	}
-	if !strings.Contains(body, senderName+" - ") {
-		t.Fatal("Expected email text '" + senderName + " - '. Got " + body)
+	if !strings.Contains(body, "@"+senderName+" - ") {
+		t.Fatal("Expected email text '@" + senderName + " - '. Got " + body)
 	}
 	if !strings.Contains(body, post.Message) {
 		t.Fatal("Expected email text '" + post.Message + "'. Got " + body)
@@ -1095,18 +1259,19 @@ func TestGetNotificationEmailBodyGenericNotificationPublicChannel(t *testing.T) 
 		DisplayName: "ChannelName",
 		Type:        model.CHANNEL_OPEN,
 	}
+	channelName := "ChannelName"
 	senderName := "sender"
 	teamName := "team"
 	teamURL := "http://localhost:8065/" + teamName
 	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_GENERIC
 	translateFunc := utils.GetUserTranslations("en")
 
-	body := th.App.getNotificationEmailBody(recipient, post, channel, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
-	if !strings.Contains(body, "You have a new notification from "+senderName) {
-		t.Fatal("Expected email text 'You have a new notification from " + senderName + "'. Got " + body)
+	body := th.App.getNotificationEmailBody(recipient, post, channel, channelName, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
+	if !strings.Contains(body, "You have a new notification from @"+senderName) {
+		t.Fatal("Expected email text 'You have a new notification from @" + senderName + "'. Got " + body)
 	}
-	if strings.Contains(body, "CHANNEL: "+channel.DisplayName) {
-		t.Fatal("Did not expect email text 'CHANNEL: " + channel.DisplayName + "'. Got " + body)
+	if strings.Contains(body, "Channel: "+channel.DisplayName) {
+		t.Fatal("Did not expect email text 'Channel: " + channel.DisplayName + "'. Got " + body)
 	}
 	if strings.Contains(body, post.Message) {
 		t.Fatal("Did not expect email text '" + post.Message + "'. Got " + body)
@@ -1128,15 +1293,16 @@ func TestGetNotificationEmailBodyGenericNotificationGroupChannel(t *testing.T) {
 		DisplayName: "ChannelName",
 		Type:        model.CHANNEL_GROUP,
 	}
+	channelName := "ChannelName"
 	senderName := "sender"
 	teamName := "team"
 	teamURL := "http://localhost:8065/" + teamName
 	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_GENERIC
 	translateFunc := utils.GetUserTranslations("en")
 
-	body := th.App.getNotificationEmailBody(recipient, post, channel, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
-	if !strings.Contains(body, "You have a new notification from "+senderName) {
-		t.Fatal("Expected email text 'You have a new notification from " + senderName + "'. Got " + body)
+	body := th.App.getNotificationEmailBody(recipient, post, channel, channelName, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
+	if !strings.Contains(body, "You have a new Group Message from @"+senderName) {
+		t.Fatal("Expected email text 'You have a new Group Message from @" + senderName + "'. Got " + body)
 	}
 	if strings.Contains(body, "CHANNEL: "+channel.DisplayName) {
 		t.Fatal("Did not expect email text 'CHANNEL: " + channel.DisplayName + "'. Got " + body)
@@ -1161,15 +1327,16 @@ func TestGetNotificationEmailBodyGenericNotificationPrivateChannel(t *testing.T)
 		DisplayName: "ChannelName",
 		Type:        model.CHANNEL_PRIVATE,
 	}
+	channelName := "ChannelName"
 	senderName := "sender"
 	teamName := "team"
 	teamURL := "http://localhost:8065/" + teamName
 	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_GENERIC
 	translateFunc := utils.GetUserTranslations("en")
 
-	body := th.App.getNotificationEmailBody(recipient, post, channel, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
-	if !strings.Contains(body, "You have a new notification from "+senderName) {
-		t.Fatal("Expected email text 'You have a new notification from " + senderName + "'. Got " + body)
+	body := th.App.getNotificationEmailBody(recipient, post, channel, channelName, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
+	if !strings.Contains(body, "You have a new notification from @"+senderName) {
+		t.Fatal("Expected email text 'You have a new notification from @" + senderName + "'. Got " + body)
 	}
 	if strings.Contains(body, "CHANNEL: "+channel.DisplayName) {
 		t.Fatal("Did not expect email text 'CHANNEL: " + channel.DisplayName + "'. Got " + body)
@@ -1194,15 +1361,16 @@ func TestGetNotificationEmailBodyGenericNotificationDirectChannel(t *testing.T) 
 		DisplayName: "ChannelName",
 		Type:        model.CHANNEL_DIRECT,
 	}
+	channelName := "ChannelName"
 	senderName := "sender"
 	teamName := "team"
 	teamURL := "http://localhost:8065/" + teamName
 	emailNotificationContentsType := model.EMAIL_NOTIFICATION_CONTENTS_GENERIC
 	translateFunc := utils.GetUserTranslations("en")
 
-	body := th.App.getNotificationEmailBody(recipient, post, channel, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
-	if !strings.Contains(body, "You have a new direct message from "+senderName) {
-		t.Fatal("Expected email text 'You have a new direct message from " + senderName + "'. Got " + body)
+	body := th.App.getNotificationEmailBody(recipient, post, channel, channelName, senderName, teamName, teamURL, emailNotificationContentsType, translateFunc)
+	if !strings.Contains(body, "You have a new Direct Message from @"+senderName) {
+		t.Fatal("Expected email text 'You have a new Direct Message from @" + senderName + "'. Got " + body)
 	}
 	if strings.Contains(body, "CHANNEL: "+channel.DisplayName) {
 		t.Fatal("Did not expect email text 'CHANNEL: " + channel.DisplayName + "'. Got " + body)
@@ -1212,5 +1380,366 @@ func TestGetNotificationEmailBodyGenericNotificationDirectChannel(t *testing.T) 
 	}
 	if !strings.Contains(body, teamURL) {
 		t.Fatal("Expected email text '" + teamURL + "'. Got " + body)
+	}
+}
+
+func TestGetPushNotificationMessage(t *testing.T) {
+	th := Setup()
+	defer th.TearDown()
+
+	for name, tc := range map[string]struct {
+		Message                  string
+		explicitMention          bool
+		channelWideMention       bool
+		HasFiles                 bool
+		replyToThreadType        string
+		Locale                   string
+		PushNotificationContents string
+		ChannelType              string
+
+		ExpectedMessage string
+	}{
+		"full message, public channel, no mention": {
+			Message:         "this is a message",
+			ChannelType:     model.CHANNEL_OPEN,
+			ExpectedMessage: "@user: this is a message",
+		},
+		"full message, public channel, mention": {
+			Message:         "this is a message",
+			explicitMention: true,
+			ChannelType:     model.CHANNEL_OPEN,
+			ExpectedMessage: "@user: this is a message",
+		},
+		"full message, public channel, channel wide mention": {
+			Message:            "this is a message",
+			channelWideMention: true,
+			ChannelType:        model.CHANNEL_OPEN,
+			ExpectedMessage:    "@user: this is a message",
+		},
+		"full message, public channel, commented on post": {
+			Message:           "this is a message",
+			replyToThreadType: THREAD_ROOT,
+			ChannelType:       model.CHANNEL_OPEN,
+			ExpectedMessage:   "@user: this is a message",
+		},
+		"full message, public channel, commented on thread": {
+			Message:           "this is a message",
+			replyToThreadType: THREAD_ANY,
+			ChannelType:       model.CHANNEL_OPEN,
+			ExpectedMessage:   "@user: this is a message",
+		},
+		"full message, private channel, no mention": {
+			Message:         "this is a message",
+			ChannelType:     model.CHANNEL_PRIVATE,
+			ExpectedMessage: "@user: this is a message",
+		},
+		"full message, private channel, mention": {
+			Message:         "this is a message",
+			explicitMention: true,
+			ChannelType:     model.CHANNEL_PRIVATE,
+			ExpectedMessage: "@user: this is a message",
+		},
+		"full message, private channel, commented on post": {
+			Message:           "this is a message",
+			replyToThreadType: THREAD_ROOT,
+			ChannelType:       model.CHANNEL_PRIVATE,
+			ExpectedMessage:   "@user: this is a message",
+		},
+		"full message, private channel, commented on thread": {
+			Message:           "this is a message",
+			replyToThreadType: THREAD_ANY,
+			ChannelType:       model.CHANNEL_PRIVATE,
+			ExpectedMessage:   "@user: this is a message",
+		},
+		"full message, group message channel, no mention": {
+			Message:         "this is a message",
+			ChannelType:     model.CHANNEL_GROUP,
+			ExpectedMessage: "@user: this is a message",
+		},
+		"full message, group message channel, mention": {
+			Message:         "this is a message",
+			explicitMention: true,
+			ChannelType:     model.CHANNEL_GROUP,
+			ExpectedMessage: "@user: this is a message",
+		},
+		"full message, group message channel, commented on post": {
+			Message:           "this is a message",
+			replyToThreadType: THREAD_ROOT,
+			ChannelType:       model.CHANNEL_GROUP,
+			ExpectedMessage:   "@user: this is a message",
+		},
+		"full message, group message channel, commented on thread": {
+			Message:           "this is a message",
+			replyToThreadType: THREAD_ANY,
+			ChannelType:       model.CHANNEL_GROUP,
+			ExpectedMessage:   "@user: this is a message",
+		},
+		"full message, direct message channel, no mention": {
+			Message:         "this is a message",
+			ChannelType:     model.CHANNEL_DIRECT,
+			ExpectedMessage: "this is a message",
+		},
+		"full message, direct message channel, mention": {
+			Message:         "this is a message",
+			explicitMention: true,
+			ChannelType:     model.CHANNEL_DIRECT,
+			ExpectedMessage: "this is a message",
+		},
+		"full message, direct message channel, commented on post": {
+			Message:           "this is a message",
+			replyToThreadType: THREAD_ROOT,
+			ChannelType:       model.CHANNEL_DIRECT,
+			ExpectedMessage:   "this is a message",
+		},
+		"full message, direct message channel, commented on thread": {
+			Message:           "this is a message",
+			replyToThreadType: THREAD_ANY,
+			ChannelType:       model.CHANNEL_DIRECT,
+			ExpectedMessage:   "this is a message",
+		},
+		"generic message with channel, public channel, no mention": {
+			Message:                  "this is a message",
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_OPEN,
+			ExpectedMessage:          "@user posted a message.",
+		},
+		"generic message with channel, public channel, mention": {
+			Message:                  "this is a message",
+			explicitMention:          true,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_OPEN,
+			ExpectedMessage:          "@user mentioned you.",
+		},
+		"generic message with channel, public channel, channel wide mention": {
+			Message:                  "this is a message",
+			channelWideMention:       true,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_OPEN,
+			ExpectedMessage:          "@user notified the channel.",
+		},
+		"generic message, public channel, commented on post": {
+			Message:                  "this is a message",
+			replyToThreadType:        THREAD_ROOT,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_OPEN,
+			ExpectedMessage:          "@user commented on your post.",
+		},
+		"generic message, public channel, commented on thread": {
+			Message:                  "this is a message",
+			replyToThreadType:        THREAD_ANY,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_OPEN,
+			ExpectedMessage:          "@user commented on a thread you participated in.",
+		},
+		"generic message with channel, private channel, no mention": {
+			Message:                  "this is a message",
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_PRIVATE,
+			ExpectedMessage:          "@user posted a message.",
+		},
+		"generic message with channel, private channel, mention": {
+			Message:                  "this is a message",
+			explicitMention:          true,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_PRIVATE,
+			ExpectedMessage:          "@user mentioned you.",
+		},
+		"generic message with channel, private channel, channel wide mention": {
+			Message:                  "this is a message",
+			channelWideMention:       true,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_PRIVATE,
+			ExpectedMessage:          "@user notified the channel.",
+		},
+		"generic message, public private, commented on post": {
+			Message:                  "this is a message",
+			replyToThreadType:        THREAD_ROOT,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_PRIVATE,
+			ExpectedMessage:          "@user commented on your post.",
+		},
+		"generic message, public private, commented on thread": {
+			Message:                  "this is a message",
+			replyToThreadType:        THREAD_ANY,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_PRIVATE,
+			ExpectedMessage:          "@user commented on a thread you participated in.",
+		},
+		"generic message with channel, group message channel, no mention": {
+			Message:                  "this is a message",
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_GROUP,
+			ExpectedMessage:          "@user posted a message.",
+		},
+		"generic message with channel, group message channel, mention": {
+			Message:                  "this is a message",
+			explicitMention:          true,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_GROUP,
+			ExpectedMessage:          "@user mentioned you.",
+		},
+		"generic message with channel, group message channel, channel wide mention": {
+			Message:                  "this is a message",
+			channelWideMention:       true,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_GROUP,
+			ExpectedMessage:          "@user notified the channel.",
+		},
+		"generic message, group message channel, commented on post": {
+			Message:                  "this is a message",
+			replyToThreadType:        THREAD_ROOT,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_GROUP,
+			ExpectedMessage:          "@user commented on your post.",
+		},
+		"generic message, group message channel, commented on thread": {
+			Message:                  "this is a message",
+			replyToThreadType:        THREAD_ANY,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_GROUP,
+			ExpectedMessage:          "@user commented on a thread you participated in.",
+		},
+		"generic message with channel, direct message channel, no mention": {
+			Message:                  "this is a message",
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_DIRECT,
+			ExpectedMessage:          "sent you a message.",
+		},
+		"generic message with channel, direct message channel, mention": {
+			Message:                  "this is a message",
+			explicitMention:          true,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_DIRECT,
+			ExpectedMessage:          "sent you a message.",
+		},
+		"generic message with channel, direct message channel, channel wide mention": {
+			Message:                  "this is a message",
+			channelWideMention:       true,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_DIRECT,
+			ExpectedMessage:          "sent you a message.",
+		},
+		"generic message, direct message channel, commented on post": {
+			Message:                  "this is a message",
+			replyToThreadType:        THREAD_ROOT,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_DIRECT,
+			ExpectedMessage:          "sent you a message.",
+		},
+		"generic message, direct message channel, commented on thread": {
+			Message:                  "this is a message",
+			replyToThreadType:        THREAD_ANY,
+			PushNotificationContents: model.GENERIC_NOTIFICATION,
+			ChannelType:              model.CHANNEL_DIRECT,
+			ExpectedMessage:          "sent you a message.",
+		},
+		"generic message without channel, public channel, no mention": {
+			Message:                  "this is a message",
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_OPEN,
+			ExpectedMessage:          "@user posted a message.",
+		},
+		"generic message without channel, public channel, mention": {
+			Message:                  "this is a message",
+			explicitMention:          true,
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_OPEN,
+			ExpectedMessage:          "@user mentioned you.",
+		},
+		"generic message without channel, private channel, no mention": {
+			Message:                  "this is a message",
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_PRIVATE,
+			ExpectedMessage:          "@user posted a message.",
+		},
+		"generic message without channel, private channel, mention": {
+			Message:                  "this is a message",
+			explicitMention:          true,
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_PRIVATE,
+			ExpectedMessage:          "@user mentioned you.",
+		},
+		"generic message without channel, group message channel, no mention": {
+			Message:                  "this is a message",
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_GROUP,
+			ExpectedMessage:          "@user posted a message.",
+		},
+		"generic message without channel, group message channel, mention": {
+			Message:                  "this is a message",
+			explicitMention:          true,
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_GROUP,
+			ExpectedMessage:          "@user mentioned you.",
+		},
+		"generic message without channel, direct message channel, no mention": {
+			Message:                  "this is a message",
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_DIRECT,
+			ExpectedMessage:          "sent you a message.",
+		},
+		"generic message without channel, direct message channel, mention": {
+			Message:                  "this is a message",
+			explicitMention:          true,
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_DIRECT,
+			ExpectedMessage:          "sent you a message.",
+		},
+		"only files, public channel": {
+			HasFiles:        true,
+			ChannelType:     model.CHANNEL_OPEN,
+			ExpectedMessage: "@user attached a file.",
+		},
+		"only files, private channel": {
+			HasFiles:        true,
+			ChannelType:     model.CHANNEL_PRIVATE,
+			ExpectedMessage: "@user attached a file.",
+		},
+		"only files, group message channel": {
+			HasFiles:        true,
+			ChannelType:     model.CHANNEL_GROUP,
+			ExpectedMessage: "@user attached a file.",
+		},
+		"only files, direct message channel": {
+			HasFiles:        true,
+			ChannelType:     model.CHANNEL_DIRECT,
+			ExpectedMessage: "attached a file.",
+		},
+		"only files without channel, public channel": {
+			HasFiles:                 true,
+			PushNotificationContents: model.GENERIC_NO_CHANNEL_NOTIFICATION,
+			ChannelType:              model.CHANNEL_OPEN,
+			ExpectedMessage:          "@user attached a file.",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			locale := tc.Locale
+			if locale == "" {
+				locale = "en"
+			}
+
+			pushNotificationContents := tc.PushNotificationContents
+			if pushNotificationContents == "" {
+				pushNotificationContents = model.FULL_NOTIFICATION
+			}
+
+			th.App.UpdateConfig(func(cfg *model.Config) {
+				*cfg.EmailSettings.PushNotificationContents = pushNotificationContents
+			})
+
+			if actualMessage := th.App.getPushNotificationMessage(
+				tc.Message,
+				tc.explicitMention,
+				tc.channelWideMention,
+				tc.HasFiles,
+				"user",
+				"channel",
+				tc.ChannelType,
+				tc.replyToThreadType,
+				utils.GetUserTranslations(locale),
+			); actualMessage != tc.ExpectedMessage {
+				t.Fatalf("Received incorrect push notification message `%v`, expected `%v`", actualMessage, tc.ExpectedMessage)
+			}
+		})
 	}
 }

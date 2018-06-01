@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	l4g "github.com/alecthomas/log4go"
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/utils"
 	goi18n "github.com/nicksnyder/go-i18n/i18n"
@@ -75,6 +75,13 @@ func (a *App) ListAutocompleteCommands(teamId string, T goi18n.TranslateFunc) ([
 		}
 	}
 
+	for _, cmd := range a.PluginCommandsForTeam(teamId) {
+		if cmd.AutoComplete && !seen[cmd.Trigger] {
+			seen[cmd.Trigger] = true
+			commands = append(commands, cmd)
+		}
+	}
+
 	if *a.Config().ServiceSettings.EnableCommands {
 		if result := <-a.Srv.Store.Command().GetByTeam(teamId); result.Err != nil {
 			return nil, result.Err
@@ -111,11 +118,18 @@ func (a *App) ListAllCommands(teamId string, T goi18n.TranslateFunc) ([]*model.C
 	for _, value := range commandProviders {
 		if cmd := value.GetCommand(a, T); cmd != nil {
 			cpy := *cmd
-			if cpy.AutoComplete && !seen[cpy.Id] {
+			if cpy.AutoComplete && !seen[cpy.Trigger] {
 				cpy.Sanitize()
 				seen[cpy.Trigger] = true
 				commands = append(commands, &cpy)
 			}
+		}
+	}
+
+	for _, cmd := range a.PluginCommandsForTeam(teamId) {
+		if !seen[cmd.Trigger] {
+			seen[cmd.Trigger] = true
+			commands = append(commands, cmd)
 		}
 	}
 
@@ -125,7 +139,7 @@ func (a *App) ListAllCommands(teamId string, T goi18n.TranslateFunc) ([]*model.C
 		} else {
 			teamCmds := result.Data.([]*model.Command)
 			for _, cmd := range teamCmds {
-				if !seen[cmd.Id] {
+				if !seen[cmd.Trigger] {
 					cmd.Sanitize()
 					seen[cmd.Trigger] = true
 					commands = append(commands, cmd)
@@ -149,6 +163,12 @@ func (a *App) ExecuteCommand(args *model.CommandArgs) (*model.CommandResponse, *
 			response := provider.DoCommand(a, args, message)
 			return a.HandleCommandResponse(cmd, args, response, true)
 		}
+	}
+
+	if cmd, response, err := a.ExecutePluginCommand(args); err != nil {
+		return nil, err
+	} else if cmd != nil {
+		return a.HandleCommandResponse(cmd, args, response, true)
 	}
 
 	if !*a.Config().ServiceSettings.EnableCommands {
@@ -187,7 +207,7 @@ func (a *App) ExecuteCommand(args *model.CommandArgs) (*model.CommandResponse, *
 		teamCmds := result.Data.([]*model.Command)
 		for _, cmd := range teamCmds {
 			if trigger == cmd.Trigger {
-				l4g.Debug(fmt.Sprintf(utils.T("api.command.execute_command.debug"), trigger, args.UserId))
+				mlog.Debug(fmt.Sprintf(utils.T("api.command.execute_command.debug"), trigger, args.UserId))
 
 				p := url.Values{}
 				p.Set("token", cmd.Token)
@@ -210,23 +230,27 @@ func (a *App) ExecuteCommand(args *model.CommandArgs) (*model.CommandResponse, *
 					p.Set("response_url", args.SiteURL+"/hooks/commands/"+hook.Id)
 				}
 
-				method := "POST"
+				var req *http.Request
 				if cmd.Method == model.COMMAND_METHOD_GET {
-					method = "GET"
+					req, _ = http.NewRequest(http.MethodGet, cmd.URL, nil)
+					req.URL.RawQuery = p.Encode()
+				} else {
+					req, _ = http.NewRequest(http.MethodPost, cmd.URL, strings.NewReader(p.Encode()))
 				}
 
-				req, _ := http.NewRequest(method, cmd.URL, strings.NewReader(p.Encode()))
 				req.Header.Set("Accept", "application/json")
+				req.Header.Set("Authorization", "Token "+cmd.Token)
 				if cmd.Method == model.COMMAND_METHOD_POST {
 					req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 				}
 
-				if resp, err := utils.HttpClient(false).Do(req); err != nil {
+				if resp, err := a.HTTPClient(false).Do(req); err != nil {
 					return nil, model.NewAppError("command", "api.command.execute_command.failed.app_error", map[string]interface{}{"Trigger": trigger}, err.Error(), http.StatusInternalServerError)
 				} else {
 					if resp.StatusCode == http.StatusOK {
-						response := model.CommandResponseFromHTTPBody(resp.Header.Get("Content-Type"), resp.Body)
-						if response == nil {
+						if response, err := model.CommandResponseFromHTTPBody(resp.Header.Get("Content-Type"), resp.Body); err != nil {
+							return nil, model.NewAppError("command", "api.command.execute_command.failed.app_error", map[string]interface{}{"Trigger": trigger}, err.Error(), http.StatusInternalServerError)
+						} else if response == nil {
 							return nil, model.NewAppError("command", "api.command.execute_command.failed_empty.app_error", map[string]interface{}{"Trigger": trigger}, "", http.StatusInternalServerError)
 						} else {
 							return a.HandleCommandResponse(cmd, args, response, false)
@@ -253,26 +277,32 @@ func (a *App) HandleCommandResponse(command *model.Command, args *model.CommandA
 	post.Type = response.Type
 	post.Props = response.Props
 
-	if !builtIn {
-		post.AddProp("from_webhook", "true")
-	}
+	isBotPost := !builtIn
 
 	if a.Config().ServiceSettings.EnablePostUsernameOverride {
 		if len(command.Username) != 0 {
 			post.AddProp("override_username", command.Username)
+			isBotPost = true
 		} else if len(response.Username) != 0 {
 			post.AddProp("override_username", response.Username)
+			isBotPost = true
 		}
 	}
 
 	if a.Config().ServiceSettings.EnablePostIconOverride {
 		if len(command.IconURL) != 0 {
 			post.AddProp("override_icon_url", command.IconURL)
+			isBotPost = true
 		} else if len(response.IconURL) != 0 {
 			post.AddProp("override_icon_url", response.IconURL)
+			isBotPost = true
 		} else {
 			post.AddProp("override_icon_url", "")
 		}
+	}
+
+	if isBotPost {
+		post.AddProp("from_webhook", "true")
 	}
 
 	// Process Slack text replacements
@@ -280,7 +310,7 @@ func (a *App) HandleCommandResponse(command *model.Command, args *model.CommandA
 	response.Attachments = a.ProcessSlackAttachments(response.Attachments)
 
 	if _, err := a.CreateCommandPost(post, args.TeamId, response); err != nil {
-		l4g.Error(err.Error())
+		mlog.Error(err.Error())
 	}
 
 	return response, nil

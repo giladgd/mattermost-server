@@ -138,6 +138,7 @@ func (s SqlComplianceStore) ComplianceExport(job *model.Compliance) store.StoreC
 			    Teams.DisplayName AS TeamDisplayName,
 			    Channels.Name AS ChannelName,
 			    Channels.DisplayName AS ChannelDisplayName,
+			    Channels.Type AS ChannelType,
 			    Users.Username AS UserUsername,
 			    Users.Email AS UserEmail,
 			    Users.Nickname AS UserNickname,
@@ -172,6 +173,7 @@ func (s SqlComplianceStore) ComplianceExport(job *model.Compliance) store.StoreC
 			    'Direct Messages' AS TeamDisplayName,
 			    Channels.Name AS ChannelName,
 			    Channels.DisplayName AS ChannelDisplayName,
+			    Channels.Type AS ChannelType,
 			    Users.Username AS UserUsername,
 			    Users.Email AS UserEmail,
 			    Users.Nickname AS UserNickname,
@@ -206,6 +208,45 @@ func (s SqlComplianceStore) ComplianceExport(job *model.Compliance) store.StoreC
 
 		if _, err := s.GetReplica().Select(&cposts, query, props); err != nil {
 			result.Err = model.NewAppError("SqlPostStore.ComplianceExport", "store.sql_post.compliance_export.app_error", nil, err.Error(), http.StatusInternalServerError)
+		} else {
+			result.Data = cposts
+		}
+	})
+}
+
+func (s SqlComplianceStore) MessageExport(after int64, limit int) store.StoreChannel {
+	return store.Do(func(result *store.StoreResult) {
+		props := map[string]interface{}{"StartTime": after, "Limit": limit}
+		query :=
+			`SELECT
+				Posts.Id AS PostId,
+				Posts.CreateAt AS PostCreateAt,
+				Posts.Message AS PostMessage,
+				Posts.Type AS PostType,
+				Posts.FileIds AS PostFileIds,
+				Channels.Id AS ChannelId,
+				CASE 
+					WHEN Channels.Type = 'D' THEN 'Direct Message'
+					WHEN Channels.Type = 'G' THEN 'Group Message'
+					ELSE Channels.DisplayName
+				END AS ChannelDisplayName,
+				Channels.Type AS ChannelType,
+				Users.Id AS UserId,
+				Users.Email AS UserEmail,
+				Users.Username
+			FROM
+				Posts
+				LEFT OUTER JOIN Channels ON Posts.ChannelId = Channels.Id
+				LEFT OUTER JOIN Users ON Posts.UserId = Users.Id
+			WHERE
+				Posts.CreateAt > :StartTime AND
+				Posts.Type = ''
+			ORDER BY PostCreateAt
+			LIMIT :Limit`
+
+		var cposts []*model.MessageExport
+		if _, err := s.GetReplica().Select(&cposts, query, props); err != nil {
+			result.Err = model.NewAppError("SqlComplianceStore.MessageExport", "store.sql_compliance.message_export.app_error", nil, err.Error(), http.StatusInternalServerError)
 		} else {
 			result.Data = cposts
 		}

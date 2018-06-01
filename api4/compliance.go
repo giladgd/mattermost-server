@@ -7,15 +7,11 @@ import (
 	"net/http"
 	"strconv"
 
-	l4g "github.com/alecthomas/log4go"
+	"github.com/avct/uasurfer"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
-	"github.com/mssola/user_agent"
 )
 
 func (api *API) InitCompliance() {
-	l4g.Debug(utils.T("api.compliance.init.debug"))
-
 	api.BaseRoutes.Compliance.Handle("/reports", api.ApiSessionRequired(createComplianceReport)).Methods("POST")
 	api.BaseRoutes.Compliance.Handle("/reports", api.ApiSessionRequired(getComplianceReports)).Methods("GET")
 	api.BaseRoutes.Compliance.Handle("/reports/{report_id:[A-Za-z0-9]+}", api.ApiSessionRequired(getComplianceReport)).Methods("GET")
@@ -112,12 +108,11 @@ func downloadComplianceReport(c *Context, w http.ResponseWriter, r *http.Request
 	w.Header().Del("Content-Type") // Content-Type will be set automatically by the http writer
 
 	// attach extra headers to trigger a download on IE, Edge, and Safari
-	ua := user_agent.New(r.UserAgent())
-	bname, _ := ua.Browser()
+	ua := uasurfer.Parse(r.UserAgent())
 
 	w.Header().Set("Content-Disposition", "attachment;filename=\""+job.JobName()+".zip\"")
 
-	if bname == "Edge" || bname == "Internet Explorer" || bname == "Safari" {
+	if ua.Browser.Name == uasurfer.BrowserIE || ua.Browser.Name == uasurfer.BrowserSafari {
 		// trim off anything before the final / so we just get the file's name
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}

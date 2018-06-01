@@ -4,16 +4,21 @@
 package storetest
 
 import (
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/store"
 )
 
 func TestChannelStore(t *testing.T, ss store.Store) {
+	createDefaultRoles(t, ss)
+
 	t.Run("Save", func(t *testing.T) { testChannelStoreSave(t, ss) })
 	t.Run("SaveDirectChannel", func(t *testing.T) { testChannelStoreSaveDirectChannel(t, ss) })
 	t.Run("CreateDirectChannel", func(t *testing.T) { testChannelStoreCreateDirectChannel(t, ss) })
@@ -24,6 +29,7 @@ func TestChannelStore(t *testing.T, ss store.Store) {
 	t.Run("Restore", func(t *testing.T) { testChannelStoreRestore(t, ss) })
 	t.Run("Delete", func(t *testing.T) { testChannelStoreDelete(t, ss) })
 	t.Run("GetByName", func(t *testing.T) { testChannelStoreGetByName(t, ss) })
+	t.Run("GetByNames", func(t *testing.T) { testChannelStoreGetByNames(t, ss) })
 	t.Run("GetDeletedByName", func(t *testing.T) { testChannelStoreGetDeletedByName(t, ss) })
 	t.Run("GetDeleted", func(t *testing.T) { testChannelStoreGetDeleted(t, ss) })
 	t.Run("ChannelMemberStore", func(t *testing.T) { testChannelMemberStore(t, ss) })
@@ -40,13 +46,16 @@ func TestChannelStore(t *testing.T, ss store.Store) {
 	t.Run("GetMember", func(t *testing.T) { testGetMember(t, ss) })
 	t.Run("GetMemberForPost", func(t *testing.T) { testChannelStoreGetMemberForPost(t, ss) })
 	t.Run("GetMemberCount", func(t *testing.T) { testGetMemberCount(t, ss) })
-	t.Run("UpdateExtrasByUser", func(t *testing.T) { testUpdateExtrasByUser(t, ss) })
 	t.Run("SearchMore", func(t *testing.T) { testChannelStoreSearchMore(t, ss) })
 	t.Run("SearchInTeam", func(t *testing.T) { testChannelStoreSearchInTeam(t, ss) })
 	t.Run("GetMembersByIds", func(t *testing.T) { testChannelStoreGetMembersByIds(t, ss) })
 	t.Run("AnalyticsDeletedTypeCount", func(t *testing.T) { testChannelStoreAnalyticsDeletedTypeCount(t, ss) })
 	t.Run("GetPinnedPosts", func(t *testing.T) { testChannelStoreGetPinnedPosts(t, ss) })
 	t.Run("MaxChannelsPerTeam", func(t *testing.T) { testChannelStoreMaxChannelsPerTeam(t, ss) })
+	t.Run("GetChannelsByScheme", func(t *testing.T) { testChannelStoreGetChannelsByScheme(t, ss) })
+	t.Run("MigrateChannelMembers", func(t *testing.T) { testChannelStoreMigrateChannelMembers(t, ss) })
+	t.Run("ResetAllChannelSchemes", func(t *testing.T) { testResetAllChannelSchemes(t, ss) })
+
 }
 
 func testChannelStoreSave(t *testing.T, ss store.Store) {
@@ -550,6 +559,57 @@ func testChannelStoreGetByName(t *testing.T, ss store.Store) {
 	}
 }
 
+func testChannelStoreGetByNames(t *testing.T, ss store.Store) {
+	o1 := model.Channel{
+		TeamId:      model.NewId(),
+		DisplayName: "Name",
+		Name:        "zz" + model.NewId() + "b",
+		Type:        model.CHANNEL_OPEN,
+	}
+	store.Must(ss.Channel().Save(&o1, -1))
+
+	o2 := model.Channel{
+		TeamId:      o1.TeamId,
+		DisplayName: "Name",
+		Name:        "zz" + model.NewId() + "b",
+		Type:        model.CHANNEL_OPEN,
+	}
+	store.Must(ss.Channel().Save(&o2, -1))
+
+	for index, tc := range []struct {
+		TeamId      string
+		Names       []string
+		ExpectedIds []string
+	}{
+		{o1.TeamId, []string{o1.Name}, []string{o1.Id}},
+		{o1.TeamId, []string{o1.Name, o2.Name}, []string{o1.Id, o2.Id}},
+		{o1.TeamId, nil, nil},
+		{o1.TeamId, []string{"foo"}, nil},
+		{o1.TeamId, []string{o1.Name, "foo", o2.Name, o2.Name}, []string{o1.Id, o2.Id}},
+		{"", []string{o1.Name, "foo", o2.Name, o2.Name}, []string{o1.Id, o2.Id}},
+		{"asd", []string{o1.Name, "foo", o2.Name, o2.Name}, nil},
+	} {
+		r := <-ss.Channel().GetByNames(tc.TeamId, tc.Names, true)
+		require.Nil(t, r.Err)
+		channels := r.Data.([]*model.Channel)
+		var ids []string
+		for _, channel := range channels {
+			ids = append(ids, channel.Id)
+		}
+		sort.Strings(ids)
+		sort.Strings(tc.ExpectedIds)
+		assert.Equal(t, tc.ExpectedIds, ids, "tc %v", index)
+	}
+
+	store.Must(ss.Channel().Delete(o1.Id, model.GetMillis()))
+	store.Must(ss.Channel().Delete(o2.Id, model.GetMillis()))
+
+	r := <-ss.Channel().GetByNames(o1.TeamId, []string{o1.Name}, false)
+	require.Nil(t, r.Err)
+	channels := r.Data.([]*model.Channel)
+	assert.Len(t, channels, 0)
+}
+
 func testChannelStoreGetDeletedByName(t *testing.T, ss store.Store) {
 	o1 := model.Channel{}
 	o1.TeamId = model.NewId()
@@ -661,7 +721,7 @@ func testChannelMemberStore(t *testing.T, ss store.Store) {
 	c1 = *store.Must(ss.Channel().Save(&c1, -1)).(*model.Channel)
 
 	c1t1 := (<-ss.Channel().Get(c1.Id, false)).Data.(*model.Channel)
-	t1 := c1t1.ExtraUpdateAt
+	assert.EqualValues(t, 0, c1t1.ExtraUpdateAt, "ExtraUpdateAt should be 0")
 
 	u1 := model.User{}
 	u1.Email = model.NewId()
@@ -688,11 +748,7 @@ func testChannelMemberStore(t *testing.T, ss store.Store) {
 	store.Must(ss.Channel().SaveMember(&o2))
 
 	c1t2 := (<-ss.Channel().Get(c1.Id, false)).Data.(*model.Channel)
-	t2 := c1t2.ExtraUpdateAt
-
-	if t2 <= t1 {
-		t.Fatal("Member update time incorrect")
-	}
+	assert.EqualValues(t, 0, c1t2.ExtraUpdateAt, "ExtraUpdateAt should be 0")
 
 	count := (<-ss.Channel().GetMemberCount(o1.ChannelId, true)).Data.(int64)
 	if count != 2 {
@@ -725,11 +781,7 @@ func testChannelMemberStore(t *testing.T, ss store.Store) {
 	}
 
 	c1t3 := (<-ss.Channel().Get(c1.Id, false)).Data.(*model.Channel)
-	t3 := c1t3.ExtraUpdateAt
-
-	if t3 <= t2 || t3 <= t1 {
-		t.Fatal("Member update time incorrect on delete")
-	}
+	assert.EqualValues(t, 0, c1t3.ExtraUpdateAt, "ExtraUpdateAt should be 0")
 
 	member := (<-ss.Channel().GetMember(o1.ChannelId, o1.UserId)).Data.(*model.ChannelMember)
 	if member.ChannelId != o1.ChannelId {
@@ -741,10 +793,7 @@ func testChannelMemberStore(t *testing.T, ss store.Store) {
 	}
 
 	c1t4 := (<-ss.Channel().Get(c1.Id, false)).Data.(*model.Channel)
-	t4 := c1t4.ExtraUpdateAt
-	if t4 != t3 {
-		t.Fatal("Should not update time upon failure")
-	}
+	assert.EqualValues(t, 0, c1t4.ExtraUpdateAt, "ExtraUpdateAt should be 0")
 }
 
 func testChannelDeleteMemberStore(t *testing.T, ss store.Store) {
@@ -756,7 +805,7 @@ func testChannelDeleteMemberStore(t *testing.T, ss store.Store) {
 	c1 = *store.Must(ss.Channel().Save(&c1, -1)).(*model.Channel)
 
 	c1t1 := (<-ss.Channel().Get(c1.Id, false)).Data.(*model.Channel)
-	t1 := c1t1.ExtraUpdateAt
+	assert.EqualValues(t, 0, c1t1.ExtraUpdateAt, "ExtraUpdateAt should be 0")
 
 	u1 := model.User{}
 	u1.Email = model.NewId()
@@ -783,11 +832,7 @@ func testChannelDeleteMemberStore(t *testing.T, ss store.Store) {
 	store.Must(ss.Channel().SaveMember(&o2))
 
 	c1t2 := (<-ss.Channel().Get(c1.Id, false)).Data.(*model.Channel)
-	t2 := c1t2.ExtraUpdateAt
-
-	if t2 <= t1 {
-		t.Fatal("Member update time incorrect")
-	}
+	assert.EqualValues(t, 0, c1t2.ExtraUpdateAt, "ExtraUpdateAt should be 0")
 
 	count := (<-ss.Channel().GetMemberCount(o1.ChannelId, false)).Data.(int64)
 	if count != 2 {
@@ -1410,11 +1455,11 @@ func testGetMember(t *testing.T, ss store.Store) {
 	store.Must(ss.Channel().SaveMember(m2))
 
 	if result := <-ss.Channel().GetMember(model.NewId(), userId); result.Err == nil {
-		t.Fatal("should've failed to get member for non-existant channel")
+		t.Fatal("should've failed to get member for non-existent channel")
 	}
 
 	if result := <-ss.Channel().GetMember(c1.Id, model.NewId()); result.Err == nil {
-		t.Fatal("should've failed to get member for non-existant user")
+		t.Fatal("should've failed to get member for non-existent user")
 	}
 
 	if result := <-ss.Channel().GetMember(c1.Id, userId); result.Err != nil {
@@ -1587,54 +1632,6 @@ func testGetMemberCount(t *testing.T, ss store.Store) {
 	}
 }
 
-func testUpdateExtrasByUser(t *testing.T, ss store.Store) {
-	teamId := model.NewId()
-
-	c1 := model.Channel{
-		TeamId:      teamId,
-		DisplayName: "Channel1",
-		Name:        "zz" + model.NewId() + "b",
-		Type:        model.CHANNEL_OPEN,
-	}
-	store.Must(ss.Channel().Save(&c1, -1))
-
-	c2 := model.Channel{
-		TeamId:      teamId,
-		DisplayName: "Channel2",
-		Name:        "zz" + model.NewId() + "b",
-		Type:        model.CHANNEL_OPEN,
-	}
-	store.Must(ss.Channel().Save(&c2, -1))
-
-	u1 := &model.User{
-		Email:    model.NewId(),
-		DeleteAt: 0,
-	}
-	store.Must(ss.User().Save(u1))
-	store.Must(ss.Team().SaveMember(&model.TeamMember{TeamId: teamId, UserId: u1.Id}, -1))
-
-	m1 := model.ChannelMember{
-		ChannelId:   c1.Id,
-		UserId:      u1.Id,
-		NotifyProps: model.GetDefaultChannelNotifyProps(),
-	}
-	store.Must(ss.Channel().SaveMember(&m1))
-
-	u1.DeleteAt = model.GetMillis()
-	store.Must(ss.User().Update(u1, true))
-
-	if result := <-ss.Channel().ExtraUpdateByUser(u1.Id, u1.DeleteAt); result.Err != nil {
-		t.Fatalf("failed to update extras by user: %v", result.Err)
-	}
-
-	u1.DeleteAt = 0
-	store.Must(ss.User().Update(u1, true))
-
-	if result := <-ss.Channel().ExtraUpdateByUser(u1.Id, u1.DeleteAt); result.Err != nil {
-		t.Fatalf("failed to update extras by user: %v", result.Err)
-	}
-}
-
 func testChannelStoreSearchMore(t *testing.T, ss store.Store) {
 	o1 := model.Channel{}
 	o1.TeamId = model.NewId()
@@ -1775,15 +1772,19 @@ func testChannelStoreSearchMore(t *testing.T, ss store.Store) {
 		}
 	}
 
-	if result := <-ss.Channel().SearchMore(m1.UserId, o1.TeamId, "off-topics"); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		channels := result.Data.(*model.ChannelList)
-		if len(*channels) != 0 {
-			t.Logf("%v\n", *channels)
-			t.Fatal("should be empty")
+	/*
+		// Disabling this check as it will fail on PostgreSQL as we have "liberalised" channel matching to deal with
+		// Full-Text Stemming Limitations.
+		if result := <-ss.Channel().SearchMore(m1.UserId, o1.TeamId, "off-topics"); result.Err != nil {
+			t.Fatal(result.Err)
+		} else {
+			channels := result.Data.(*model.ChannelList)
+			if len(*channels) != 0 {
+				t.Logf("%v\n", *channels)
+				t.Fatal("should be empty")
+			}
 		}
-	}
+	*/
 }
 
 func testChannelStoreSearchInTeam(t *testing.T, ss store.Store) {
@@ -1868,83 +1869,123 @@ func testChannelStoreSearchInTeam(t *testing.T, ss store.Store) {
 	o9.Type = model.CHANNEL_OPEN
 	store.Must(ss.Channel().Save(&o9, -1))
 
-	if result := <-ss.Channel().SearchInTeam(o1.TeamId, "ChannelA"); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		channels := result.Data.(*model.ChannelList)
-		if len(*channels) != 2 {
-			t.Fatal("wrong length")
-		}
-	}
+	o10 := model.Channel{}
+	o10.TeamId = o1.TeamId
+	o10.DisplayName = "The"
+	o10.Name = "the"
+	o10.Type = model.CHANNEL_OPEN
+	store.Must(ss.Channel().Save(&o10, -1))
 
-	if result := <-ss.Channel().SearchInTeam(o1.TeamId, ""); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		channels := result.Data.(*model.ChannelList)
-		if len(*channels) == 0 {
-			t.Fatal("should not be empty")
-		}
-	}
+	o11 := model.Channel{}
+	o11.TeamId = o1.TeamId
+	o11.DisplayName = "Native Mobile Apps"
+	o11.Name = "native-mobile-apps"
+	o11.Type = model.CHANNEL_OPEN
+	store.Must(ss.Channel().Save(&o11, -1))
 
-	if result := <-ss.Channel().SearchInTeam(o1.TeamId, "blargh"); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		channels := result.Data.(*model.ChannelList)
-		if len(*channels) != 0 {
-			t.Fatal("should be empty")
-		}
-	}
+	for name, search := range map[string]func(teamId string, term string) store.StoreChannel{
+		"AutocompleteInTeam": ss.Channel().AutocompleteInTeam,
+		"SearchInTeam":       ss.Channel().SearchInTeam,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if result := <-search(o1.TeamId, "ChannelA"); result.Err != nil {
+				t.Fatal(result.Err)
+			} else {
+				channels := result.Data.(*model.ChannelList)
+				if len(*channels) != 2 {
+					t.Fatal("wrong length")
+				}
+			}
 
-	if result := <-ss.Channel().SearchInTeam(o1.TeamId, "off-"); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		channels := result.Data.(*model.ChannelList)
-		if len(*channels) != 2 {
-			t.Fatal("should return 2 channels, not including private channel")
-		}
+			if result := <-search(o1.TeamId, ""); result.Err != nil {
+				t.Fatal(result.Err)
+			} else {
+				channels := result.Data.(*model.ChannelList)
+				if len(*channels) == 0 {
+					t.Fatal("should not be empty")
+				}
+			}
 
-		if (*channels)[0].Name != o7.Name {
-			t.Fatal("wrong channel returned")
-		}
+			if result := <-search(o1.TeamId, "blargh"); result.Err != nil {
+				t.Fatal(result.Err)
+			} else {
+				channels := result.Data.(*model.ChannelList)
+				if len(*channels) != 0 {
+					t.Fatal("should be empty")
+				}
+			}
 
-		if (*channels)[1].Name != o6.Name {
-			t.Fatal("wrong channel returned")
-		}
-	}
+			if result := <-search(o1.TeamId, "off-"); result.Err != nil {
+				t.Fatal(result.Err)
+			} else {
+				channels := result.Data.(*model.ChannelList)
+				if len(*channels) != 2 {
+					t.Fatal("should return 2 channels, not including private channel")
+				}
 
-	if result := <-ss.Channel().SearchInTeam(o1.TeamId, "off-topic"); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		channels := result.Data.(*model.ChannelList)
-		if len(*channels) != 1 {
-			t.Fatal("should return 1 channel")
-		}
+				if (*channels)[0].Name != o7.Name {
+					t.Fatal("wrong channel returned")
+				}
 
-		if (*channels)[0].Name != o6.Name {
-			t.Fatal("wrong channel returned")
-		}
-	}
+				if (*channels)[1].Name != o6.Name {
+					t.Fatal("wrong channel returned")
+				}
+			}
 
-	if result := <-ss.Channel().SearchInTeam(o1.TeamId, "off-topics"); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		channels := result.Data.(*model.ChannelList)
-		if len(*channels) != 0 {
-			t.Fatal("should be empty")
-		}
-	}
+			if result := <-search(o1.TeamId, "off-topic"); result.Err != nil {
+				t.Fatal(result.Err)
+			} else {
+				channels := result.Data.(*model.ChannelList)
+				if len(*channels) != 1 {
+					t.Fatal("should return 1 channel")
+				}
 
-	if result := <-ss.Channel().SearchInTeam(o1.TeamId, "town square"); result.Err != nil {
-		t.Fatal(result.Err)
-	} else {
-		channels := result.Data.(*model.ChannelList)
-		if len(*channels) != 1 {
-			t.Fatal("should return 1 channel")
-		}
+				if (*channels)[0].Name != o6.Name {
+					t.Fatal("wrong channel returned")
+				}
+			}
 
-		if (*channels)[0].Name != o9.Name {
-			t.Fatal("wrong channel returned")
-		}
+			if result := <-search(o1.TeamId, "town square"); result.Err != nil {
+				t.Fatal(result.Err)
+			} else {
+				channels := result.Data.(*model.ChannelList)
+				if len(*channels) != 1 {
+					t.Fatal("should return 1 channel")
+				}
+
+				if (*channels)[0].Name != o9.Name {
+					t.Fatal("wrong channel returned")
+				}
+			}
+
+			if result := <-search(o1.TeamId, "the"); result.Err != nil {
+				t.Fatal(result.Err)
+			} else {
+				channels := result.Data.(*model.ChannelList)
+				t.Log(channels.ToJson())
+				if len(*channels) != 1 {
+					t.Fatal("should return 1 channel")
+				}
+
+				if (*channels)[0].Name != o10.Name {
+					t.Fatal("wrong channel returned")
+				}
+			}
+
+			if result := <-search(o1.TeamId, "Mobile"); result.Err != nil {
+				t.Fatal(result.Err)
+			} else {
+				channels := result.Data.(*model.ChannelList)
+				t.Log(channels.ToJson())
+				if len(*channels) != 1 {
+					t.Fatal("should return 1 channel")
+				}
+
+				if (*channels)[0].Name != o11.Name {
+					t.Fatal("wrong channel returned")
+				}
+			}
+		})
 	}
 }
 
@@ -2136,4 +2177,184 @@ func testChannelStoreMaxChannelsPerTeam(t *testing.T, ss store.Store) {
 	channel.Id = ""
 	result = <-ss.Channel().Save(channel, 1)
 	assert.Nil(t, result.Err)
+}
+
+func testChannelStoreGetChannelsByScheme(t *testing.T, ss store.Store) {
+	// Create some schemes.
+	s1 := &model.Scheme{
+		DisplayName: model.NewId(),
+		Name:        model.NewId(),
+		Description: model.NewId(),
+		Scope:       model.SCHEME_SCOPE_CHANNEL,
+	}
+
+	s2 := &model.Scheme{
+		DisplayName: model.NewId(),
+		Name:        model.NewId(),
+		Description: model.NewId(),
+		Scope:       model.SCHEME_SCOPE_CHANNEL,
+	}
+
+	s1 = (<-ss.Scheme().Save(s1)).Data.(*model.Scheme)
+	s2 = (<-ss.Scheme().Save(s2)).Data.(*model.Scheme)
+
+	// Create and save some teams.
+	c1 := &model.Channel{
+		TeamId:      model.NewId(),
+		DisplayName: "Name",
+		Name:        model.NewId(),
+		Type:        model.CHANNEL_OPEN,
+		SchemeId:    &s1.Id,
+	}
+
+	c2 := &model.Channel{
+		TeamId:      model.NewId(),
+		DisplayName: "Name",
+		Name:        model.NewId(),
+		Type:        model.CHANNEL_OPEN,
+		SchemeId:    &s1.Id,
+	}
+
+	c3 := &model.Channel{
+		TeamId:      model.NewId(),
+		DisplayName: "Name",
+		Name:        model.NewId(),
+		Type:        model.CHANNEL_OPEN,
+	}
+
+	c1 = (<-ss.Channel().Save(c1, 100)).Data.(*model.Channel)
+	c2 = (<-ss.Channel().Save(c2, 100)).Data.(*model.Channel)
+	c3 = (<-ss.Channel().Save(c3, 100)).Data.(*model.Channel)
+
+	// Get the channels by a valid Scheme ID.
+	res1 := <-ss.Channel().GetChannelsByScheme(s1.Id, 0, 100)
+	assert.Nil(t, res1.Err)
+	d1 := res1.Data.(model.ChannelList)
+	assert.Len(t, d1, 2)
+
+	// Get the channels by a valid Scheme ID where there aren't any matching Channel.
+	res2 := <-ss.Channel().GetChannelsByScheme(s2.Id, 0, 100)
+	assert.Nil(t, res2.Err)
+	d2 := res2.Data.(model.ChannelList)
+	assert.Len(t, d2, 0)
+
+	// Get the channels by an invalid Scheme ID.
+	res3 := <-ss.Channel().GetChannelsByScheme(model.NewId(), 0, 100)
+	assert.Nil(t, res3.Err)
+	d3 := res3.Data.(model.ChannelList)
+	assert.Len(t, d3, 0)
+}
+
+func testChannelStoreMigrateChannelMembers(t *testing.T, ss store.Store) {
+	s1 := model.NewId()
+	c1 := &model.Channel{
+		TeamId:      model.NewId(),
+		DisplayName: "Name",
+		Name:        model.NewId(),
+		Type:        model.CHANNEL_OPEN,
+		SchemeId:    &s1,
+	}
+	c1 = (<-ss.Channel().Save(c1, 100)).Data.(*model.Channel)
+
+	cm1 := &model.ChannelMember{
+		ChannelId:     c1.Id,
+		UserId:        model.NewId(),
+		ExplicitRoles: "channel_admin channel_user",
+		NotifyProps:   model.GetDefaultChannelNotifyProps(),
+	}
+	cm2 := &model.ChannelMember{
+		ChannelId:     c1.Id,
+		UserId:        model.NewId(),
+		ExplicitRoles: "channel_user",
+		NotifyProps:   model.GetDefaultChannelNotifyProps(),
+	}
+	cm3 := &model.ChannelMember{
+		ChannelId:     c1.Id,
+		UserId:        model.NewId(),
+		ExplicitRoles: "something_else",
+		NotifyProps:   model.GetDefaultChannelNotifyProps(),
+	}
+
+	cm1 = (<-ss.Channel().SaveMember(cm1)).Data.(*model.ChannelMember)
+	cm2 = (<-ss.Channel().SaveMember(cm2)).Data.(*model.ChannelMember)
+	cm3 = (<-ss.Channel().SaveMember(cm3)).Data.(*model.ChannelMember)
+
+	lastDoneChannelId := strings.Repeat("0", 26)
+	lastDoneUserId := strings.Repeat("0", 26)
+
+	for {
+		res := <-ss.Channel().MigrateChannelMembers(lastDoneChannelId, lastDoneUserId)
+		if assert.Nil(t, res.Err) {
+			if res.Data == nil {
+				break
+			}
+			data := res.Data.(map[string]string)
+			lastDoneChannelId = data["ChannelId"]
+			lastDoneUserId = data["UserId"]
+		}
+	}
+
+	ss.Channel().ClearCaches()
+
+	res1 := <-ss.Channel().GetMember(cm1.ChannelId, cm1.UserId)
+	assert.Nil(t, res1.Err)
+	cm1b := res1.Data.(*model.ChannelMember)
+	assert.Equal(t, "", cm1b.ExplicitRoles)
+	assert.True(t, cm1b.SchemeUser)
+	assert.True(t, cm1b.SchemeAdmin)
+
+	res2 := <-ss.Channel().GetMember(cm2.ChannelId, cm2.UserId)
+	assert.Nil(t, res2.Err)
+	cm2b := res2.Data.(*model.ChannelMember)
+	assert.Equal(t, "", cm2b.ExplicitRoles)
+	assert.True(t, cm2b.SchemeUser)
+	assert.False(t, cm2b.SchemeAdmin)
+
+	res3 := <-ss.Channel().GetMember(cm3.ChannelId, cm3.UserId)
+	assert.Nil(t, res3.Err)
+	cm3b := res3.Data.(*model.ChannelMember)
+	assert.Equal(t, "something_else", cm3b.ExplicitRoles)
+	assert.False(t, cm3b.SchemeUser)
+	assert.False(t, cm3b.SchemeAdmin)
+}
+
+func testResetAllChannelSchemes(t *testing.T, ss store.Store) {
+	s1 := &model.Scheme{
+		Name:        model.NewId(),
+		DisplayName: model.NewId(),
+		Description: model.NewId(),
+		Scope:       model.SCHEME_SCOPE_CHANNEL,
+	}
+	s1 = (<-ss.Scheme().Save(s1)).Data.(*model.Scheme)
+
+	c1 := &model.Channel{
+		TeamId:      model.NewId(),
+		DisplayName: "Name",
+		Name:        model.NewId(),
+		Type:        model.CHANNEL_OPEN,
+		SchemeId:    &s1.Id,
+	}
+
+	c2 := &model.Channel{
+		TeamId:      model.NewId(),
+		DisplayName: "Name",
+		Name:        model.NewId(),
+		Type:        model.CHANNEL_OPEN,
+		SchemeId:    &s1.Id,
+	}
+
+	c1 = (<-ss.Channel().Save(c1, 100)).Data.(*model.Channel)
+	c2 = (<-ss.Channel().Save(c2, 100)).Data.(*model.Channel)
+
+	assert.Equal(t, s1.Id, *c1.SchemeId)
+	assert.Equal(t, s1.Id, *c2.SchemeId)
+
+	res := <-ss.Channel().ResetAllChannelSchemes()
+	assert.Nil(t, res.Err)
+
+	c1 = (<-ss.Channel().Get(c1.Id, true)).Data.(*model.Channel)
+	c2 = (<-ss.Channel().Get(c2.Id, true)).Data.(*model.Channel)
+
+	assert.Equal(t, "", *c1.SchemeId)
+	assert.Equal(t, "", *c2.SchemeId)
 }

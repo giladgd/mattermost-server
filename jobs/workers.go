@@ -6,32 +6,37 @@ package jobs
 import (
 	"sync"
 
-	l4g "github.com/alecthomas/log4go"
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 type Workers struct {
-	startOnce sync.Once
-	Config    model.ConfigFunc
-	Watcher   *Watcher
+	startOnce     sync.Once
+	ConfigService ConfigService
+	Watcher       *Watcher
 
 	DataRetention            model.Worker
+	MessageExport            model.Worker
 	ElasticsearchIndexing    model.Worker
 	ElasticsearchAggregation model.Worker
 	LdapSync                 model.Worker
+	Migrations               model.Worker
 
 	listenerId string
 }
 
 func (srv *JobServer) InitWorkers() *Workers {
 	workers := &Workers{
-		Config: srv.Config,
+		ConfigService: srv.ConfigService,
 	}
 	workers.Watcher = srv.MakeWatcher(workers, DEFAULT_WATCHER_POLLING_INTERVAL)
 
 	if srv.DataRetentionJob != nil {
 		workers.DataRetention = srv.DataRetentionJob.MakeWorker()
+	}
+
+	if srv.MessageExportJob != nil {
+		workers.MessageExport = srv.MessageExportJob.MakeWorker()
 	}
 
 	if elasticsearchIndexerInterface := srv.ElasticsearchIndexer; elasticsearchIndexerInterface != nil {
@@ -46,33 +51,45 @@ func (srv *JobServer) InitWorkers() *Workers {
 		workers.LdapSync = ldapSyncInterface.MakeWorker()
 	}
 
+	if migrationsInterface := srv.Migrations; migrationsInterface != nil {
+		workers.Migrations = migrationsInterface.MakeWorker()
+	}
+
 	return workers
 }
 
 func (workers *Workers) Start() *Workers {
-	l4g.Info("Starting workers")
+	mlog.Info("Starting workers")
 
 	workers.startOnce.Do(func() {
-		if workers.DataRetention != nil && (*workers.Config().DataRetentionSettings.EnableMessageDeletion || *workers.Config().DataRetentionSettings.EnableFileDeletion) {
+		if workers.DataRetention != nil && (*workers.ConfigService.Config().DataRetentionSettings.EnableMessageDeletion || *workers.ConfigService.Config().DataRetentionSettings.EnableFileDeletion) {
 			go workers.DataRetention.Run()
 		}
 
-		if workers.ElasticsearchIndexing != nil && *workers.Config().ElasticsearchSettings.EnableIndexing {
+		if workers.MessageExport != nil && *workers.ConfigService.Config().MessageExportSettings.EnableExport {
+			go workers.MessageExport.Run()
+		}
+
+		if workers.ElasticsearchIndexing != nil && *workers.ConfigService.Config().ElasticsearchSettings.EnableIndexing {
 			go workers.ElasticsearchIndexing.Run()
 		}
 
-		if workers.ElasticsearchAggregation != nil && *workers.Config().ElasticsearchSettings.EnableIndexing {
+		if workers.ElasticsearchAggregation != nil && *workers.ConfigService.Config().ElasticsearchSettings.EnableIndexing {
 			go workers.ElasticsearchAggregation.Run()
 		}
 
-		if workers.LdapSync != nil && *workers.Config().LdapSettings.EnableSync {
+		if workers.LdapSync != nil && *workers.ConfigService.Config().LdapSettings.EnableSync {
 			go workers.LdapSync.Run()
+		}
+
+		if workers.Migrations != nil {
+			go workers.Migrations.Run()
 		}
 
 		go workers.Watcher.Start()
 	})
 
-	workers.listenerId = utils.AddConfigListener(workers.handleConfigChange)
+	workers.listenerId = workers.ConfigService.AddConfigListener(workers.handleConfigChange)
 
 	return workers
 }
@@ -83,6 +100,14 @@ func (workers *Workers) handleConfigChange(oldConfig *model.Config, newConfig *m
 			go workers.DataRetention.Run()
 		} else if (*oldConfig.DataRetentionSettings.EnableMessageDeletion || *oldConfig.DataRetentionSettings.EnableFileDeletion) && (!*newConfig.DataRetentionSettings.EnableMessageDeletion && !*newConfig.DataRetentionSettings.EnableFileDeletion) {
 			workers.DataRetention.Stop()
+		}
+	}
+
+	if workers.MessageExport != nil {
+		if !*oldConfig.MessageExportSettings.EnableExport && *newConfig.MessageExportSettings.EnableExport {
+			go workers.MessageExport.Run()
+		} else if *oldConfig.MessageExportSettings.EnableExport && !*newConfig.MessageExportSettings.EnableExport {
+			workers.MessageExport.Stop()
 		}
 	}
 
@@ -112,27 +137,35 @@ func (workers *Workers) handleConfigChange(oldConfig *model.Config, newConfig *m
 }
 
 func (workers *Workers) Stop() *Workers {
-	utils.RemoveConfigListener(workers.listenerId)
+	workers.ConfigService.RemoveConfigListener(workers.listenerId)
 
 	workers.Watcher.Stop()
 
-	if workers.DataRetention != nil && (*workers.Config().DataRetentionSettings.EnableMessageDeletion || *workers.Config().DataRetentionSettings.EnableFileDeletion) {
+	if workers.DataRetention != nil && (*workers.ConfigService.Config().DataRetentionSettings.EnableMessageDeletion || *workers.ConfigService.Config().DataRetentionSettings.EnableFileDeletion) {
 		workers.DataRetention.Stop()
 	}
 
-	if workers.ElasticsearchIndexing != nil && *workers.Config().ElasticsearchSettings.EnableIndexing {
+	if workers.MessageExport != nil && *workers.ConfigService.Config().MessageExportSettings.EnableExport {
+		workers.MessageExport.Stop()
+	}
+
+	if workers.ElasticsearchIndexing != nil && *workers.ConfigService.Config().ElasticsearchSettings.EnableIndexing {
 		workers.ElasticsearchIndexing.Stop()
 	}
 
-	if workers.ElasticsearchAggregation != nil && *workers.Config().ElasticsearchSettings.EnableIndexing {
+	if workers.ElasticsearchAggregation != nil && *workers.ConfigService.Config().ElasticsearchSettings.EnableIndexing {
 		workers.ElasticsearchAggregation.Stop()
 	}
 
-	if workers.LdapSync != nil && *workers.Config().LdapSettings.EnableSync {
+	if workers.LdapSync != nil && *workers.ConfigService.Config().LdapSettings.EnableSync {
 		workers.LdapSync.Stop()
 	}
 
-	l4g.Info("Stopped workers")
+	if workers.Migrations != nil {
+		workers.Migrations.Stop()
+	}
+
+	mlog.Info("Stopped workers")
 
 	return workers
 }

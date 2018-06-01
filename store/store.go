@@ -6,8 +6,6 @@ package store
 import (
 	"time"
 
-	l4g "github.com/alecthomas/log4go"
-
 	"github.com/mattermost/mattermost-server/model"
 )
 
@@ -32,7 +30,7 @@ func Do(f func(result *StoreResult)) StoreChannel {
 func Must(sc StoreChannel) interface{} {
 	r := <-sc
 	if r.Err != nil {
-		l4g.Close()
+
 		time.Sleep(time.Second)
 		panic(r.Err)
 	}
@@ -61,8 +59,12 @@ type Store interface {
 	Status() StatusStore
 	FileInfo() FileInfoStore
 	Reaction() ReactionStore
+	Role() RoleStore
+	Scheme() SchemeStore
 	Job() JobStore
 	UserAccessToken() UserAccessTokenStore
+	ChannelMemberHistory() ChannelMemberHistoryStore
+	Plugin() PluginStore
 	MarkSystemRanUnitTests()
 	Close()
 	DropAllTables()
@@ -101,6 +103,10 @@ type TeamStore interface {
 	RemoveMember(teamId string, userId string) StoreChannel
 	RemoveAllMembersByTeam(teamId string) StoreChannel
 	RemoveAllMembersByUser(userId string) StoreChannel
+	UpdateLastTeamIconUpdate(teamId string, curTime int64) StoreChannel
+	GetTeamsByScheme(schemeId string, offset int, limit int) StoreChannel
+	MigrateTeamMembers(fromTeamId string, fromUserId string) StoreChannel
+	ResetAllTeamSchemes() StoreChannel
 }
 
 type ChannelStore interface {
@@ -118,6 +124,7 @@ type ChannelStore interface {
 	PermanentDeleteByTeam(teamId string) StoreChannel
 	PermanentDelete(channelId string) StoreChannel
 	GetByName(team_id string, name string, allowFromCache bool) StoreChannel
+	GetByNames(team_id string, names []string, allowFromCache bool) StoreChannel
 	GetByNameIncludeDeleted(team_id string, name string, allowFromCache bool) StoreChannel
 	GetDeletedByName(team_id string, name string) StoreChannel
 	GetDeleted(team_id string, offset int, limit int) StoreChannel
@@ -149,13 +156,24 @@ type ChannelStore interface {
 	UpdateLastViewedAt(channelIds []string, userId string) StoreChannel
 	IncrementMentionCount(channelId string, userId string) StoreChannel
 	AnalyticsTypeCount(teamId string, channelType string) StoreChannel
-	ExtraUpdateByUser(userId string, time int64) StoreChannel
 	GetMembersForUser(teamId string, userId string) StoreChannel
+	AutocompleteInTeam(teamId string, term string) StoreChannel
 	SearchInTeam(teamId string, term string) StoreChannel
 	SearchMore(userId string, teamId string, term string) StoreChannel
 	GetMembersByIds(channelId string, userIds []string) StoreChannel
 	AnalyticsDeletedTypeCount(teamId string, channelType string) StoreChannel
 	GetChannelUnread(channelId, userId string) StoreChannel
+	ClearCaches()
+	GetChannelsByScheme(schemeId string, offset int, limit int) StoreChannel
+	MigrateChannelMembers(fromChannelId string, fromUserId string) StoreChannel
+	ResetAllChannelSchemes() StoreChannel
+}
+
+type ChannelMemberHistoryStore interface {
+	LogJoinEvent(userId string, channelId string, joinTime int64) StoreChannel
+	LogLeaveEvent(userId string, channelId string, leaveTime int64) StoreChannel
+	GetUsersInChannelDuring(startTime int64, endTime int64, channelId string) StoreChannel
+	PermanentDeleteBatch(endTime int64, limit int64) StoreChannel
 }
 
 type PostStore interface {
@@ -178,6 +196,7 @@ type PostStore interface {
 	AnalyticsUserCountsWithPostsByDay(teamId string) StoreChannel
 	AnalyticsPostCountsByDay(teamId string) StoreChannel
 	AnalyticsPostCount(teamId string, mustHaveFile bool, mustHaveHashtag bool) StoreChannel
+	ClearCaches()
 	InvalidateLastPostTimeCache(channelId string)
 	GetPostsCreatedAt(channelId string, time int64) StoreChannel
 	Overwrite(post *model.Post) StoreChannel
@@ -185,6 +204,7 @@ type PostStore interface {
 	GetPostsBatchForIndexing(startTime int64, endTime int64, limit int) StoreChannel
 	PermanentDeleteBatch(endTime int64, limit int64) StoreChannel
 	GetOldest() StoreChannel
+	GetMaxPostSize() StoreChannel
 }
 
 type UserStore interface {
@@ -198,9 +218,11 @@ type UserStore interface {
 	UpdateMfaActive(userId string, active bool) StoreChannel
 	Get(id string) StoreChannel
 	GetAll() StoreChannel
+	ClearCaches()
 	InvalidateProfilesInChannelCacheByUser(userId string)
 	InvalidateProfilesInChannelCache(channelId string)
 	GetProfilesInChannel(channelId string, offset int, limit int) StoreChannel
+	GetProfilesInChannelByStatus(channelId string, offset int, limit int) StoreChannel
 	GetAllProfilesInChannel(channelId string, allowFromCache bool) StoreChannel
 	GetProfilesNotInChannel(teamId string, channelId string, offset int, limit int) StoreChannel
 	GetProfilesWithoutTeam(offset int, limit int) StoreChannel
@@ -213,7 +235,7 @@ type UserStore interface {
 	GetByAuth(authData *string, authService string) StoreChannel
 	GetAllUsingAuthService(authService string) StoreChannel
 	GetByUsername(username string) StoreChannel
-	GetForLogin(loginId string, allowSignInWithUsername, allowSignInWithEmail, ldapEnabled bool) StoreChannel
+	GetForLogin(loginId string, allowSignInWithUsername, allowSignInWithEmail bool) StoreChannel
 	VerifyEmail(userId string) StoreChannel
 	GetEtagForAllProfiles() StoreChannel
 	GetEtagForProfiles(teamId string) StoreChannel
@@ -250,6 +272,7 @@ type SessionStore interface {
 	UpdateRoles(userId string, roles string) StoreChannel
 	UpdateDeviceId(id string, deviceId string, expiresAt int64) StoreChannel
 	AnalyticsSessionCount() StoreChannel
+	Cleanup(expiryTime int64, batchSize int64)
 }
 
 type AuditStore interface {
@@ -274,6 +297,7 @@ type ComplianceStore interface {
 	Get(id string) StoreChannel
 	GetAll(offset, limit int) StoreChannel
 	ComplianceExport(compliance *model.Compliance) StoreChannel
+	MessageExport(after int64, limit int) StoreChannel
 }
 
 type OAuthStore interface {
@@ -303,6 +327,7 @@ type SystemStore interface {
 	Update(system *model.System) StoreChannel
 	Get() StoreChannel
 	GetByName(name string) StoreChannel
+	PermanentDeleteByName(name string) StoreChannel
 }
 
 type WebhookStore interface {
@@ -329,6 +354,7 @@ type WebhookStore interface {
 	AnalyticsIncomingCount(teamId string) StoreChannel
 	AnalyticsOutgoingCount(teamId string) StoreChannel
 	InvalidateWebhookCache(webhook string)
+	ClearCaches()
 }
 
 type CommandStore interface {
@@ -379,8 +405,9 @@ type EmojiStore interface {
 	Save(emoji *model.Emoji) StoreChannel
 	Get(id string, allowFromCache bool) StoreChannel
 	GetByName(name string) StoreChannel
-	GetList(offset, limit int) StoreChannel
+	GetList(offset, limit int, sort string) StoreChannel
 	Delete(id string, time int64) StoreChannel
+	Search(name string, prefixOnly bool, limit int) StoreChannel
 }
 
 type StatusStore interface {
@@ -405,6 +432,7 @@ type FileInfoStore interface {
 	DeleteForPost(postId string) StoreChannel
 	PermanentDelete(fileId string) StoreChannel
 	PermanentDeleteBatch(endTime int64, limit int64) StoreChannel
+	ClearCaches()
 }
 
 type ReactionStore interface {
@@ -435,8 +463,33 @@ type UserAccessTokenStore interface {
 	Delete(tokenId string) StoreChannel
 	DeleteAllForUser(userId string) StoreChannel
 	Get(tokenId string) StoreChannel
+	GetAll(offset int, limit int) StoreChannel
 	GetByToken(tokenString string) StoreChannel
 	GetByUser(userId string, page, perPage int) StoreChannel
+	Search(term string) StoreChannel
 	UpdateTokenEnable(tokenId string) StoreChannel
 	UpdateTokenDisable(tokenId string) StoreChannel
+}
+
+type PluginStore interface {
+	SaveOrUpdate(keyVal *model.PluginKeyValue) StoreChannel
+	Get(pluginId, key string) StoreChannel
+	Delete(pluginId, key string) StoreChannel
+}
+
+type RoleStore interface {
+	Save(role *model.Role) StoreChannel
+	Get(roleId string) StoreChannel
+	GetByName(name string) StoreChannel
+	GetByNames(names []string) StoreChannel
+	Delete(roldId string) StoreChannel
+	PermanentDeleteAll() StoreChannel
+}
+
+type SchemeStore interface {
+	Save(scheme *model.Scheme) StoreChannel
+	Get(schemeId string) StoreChannel
+	GetAllPage(scope string, offset int, limit int) StoreChannel
+	Delete(schemeId string) StoreChannel
+	PermanentDeleteAll() StoreChannel
 }

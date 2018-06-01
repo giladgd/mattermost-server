@@ -49,12 +49,13 @@ type Features struct {
 	CustomBrand               *bool `json:"custom_brand"`
 	MHPNS                     *bool `json:"mhpns"`
 	SAML                      *bool `json:"saml"`
-	PasswordRequirements      *bool `json:"password_requirements"`
 	Elasticsearch             *bool `json:"elastic_search"`
 	Announcement              *bool `json:"announcement"`
 	ThemeManagement           *bool `json:"theme_management"`
 	EmailNotificationContents *bool `json:"email_notification_contents"`
 	DataRetention             *bool `json:"data_retention"`
+	MessageExport             *bool `json:"message_export"`
+	CustomPermissionsSchemes  *bool `json:"custom_permissions_schemes"`
 
 	// after we enabled more features for webrtc we'll need to control them with this
 	FutureFeatures *bool `json:"future_features"`
@@ -72,10 +73,11 @@ func (f *Features) ToMap() map[string]interface{} {
 		"custom_brand":                *f.CustomBrand,
 		"mhpns":                       *f.MHPNS,
 		"saml":                        *f.SAML,
-		"password":                    *f.PasswordRequirements,
 		"elastic_search":              *f.Elasticsearch,
 		"email_notification_contents": *f.EmailNotificationContents,
 		"data_retention":              *f.DataRetention,
+		"message_export":              *f.MessageExport,
+		"custom_permissions_schemes":  *f.CustomPermissionsSchemes,
 		"future":                      *f.FutureFeatures,
 	}
 }
@@ -129,10 +131,6 @@ func (f *Features) SetDefaults() {
 		f.SAML = NewBool(*f.FutureFeatures)
 	}
 
-	if f.PasswordRequirements == nil {
-		f.PasswordRequirements = NewBool(*f.FutureFeatures)
-	}
-
 	if f.Elasticsearch == nil {
 		f.Elasticsearch = NewBool(*f.FutureFeatures)
 	}
@@ -152,6 +150,14 @@ func (f *Features) SetDefaults() {
 	if f.DataRetention == nil {
 		f.DataRetention = NewBool(*f.FutureFeatures)
 	}
+
+	if f.MessageExport == nil {
+		f.MessageExport = NewBool(*f.FutureFeatures)
+	}
+
+	if f.CustomPermissionsSchemes == nil {
+		f.CustomPermissionsSchemes = NewBool(*f.FutureFeatures)
+	}
 }
 
 func (l *License) IsExpired() bool {
@@ -163,23 +169,33 @@ func (l *License) IsStarted() bool {
 }
 
 func (l *License) ToJson() string {
-	b, err := json.Marshal(l)
-	if err != nil {
-		return ""
-	} else {
-		return string(b)
+	b, _ := json.Marshal(l)
+	return string(b)
+}
+
+// NewTestLicense returns a license that expires in the future and has the given features.
+func NewTestLicense(features ...string) *License {
+	ret := &License{
+		ExpiresAt: GetMillis() + 90*24*60*60*1000,
+		Customer:  &Customer{},
+		Features:  &Features{},
 	}
+	ret.Features.SetDefaults()
+
+	featureMap := map[string]bool{}
+	for _, feature := range features {
+		featureMap[feature] = true
+	}
+	featureJson, _ := json.Marshal(featureMap)
+	json.Unmarshal(featureJson, &ret.Features)
+
+	return ret
 }
 
 func LicenseFromJson(data io.Reader) *License {
-	decoder := json.NewDecoder(data)
-	var o License
-	err := decoder.Decode(&o)
-	if err == nil {
-		return &o
-	} else {
-		return nil
-	}
+	var o *License
+	json.NewDecoder(data).Decode(&o)
+	return o
 }
 
 func (lr *LicenseRecord) IsValid() *AppError {

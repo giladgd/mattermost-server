@@ -4,22 +4,19 @@
 package api4
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
-	l4g "github.com/alecthomas/log4go"
-
 	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/utils"
 )
 
 func (api *API) InitPost() {
-	l4g.Debug(utils.T("api.post.init.debug"))
-
 	api.BaseRoutes.Posts.Handle("", api.ApiSessionRequired(createPost)).Methods("POST")
 	api.BaseRoutes.Post.Handle("", api.ApiSessionRequired(getPost)).Methods("GET")
 	api.BaseRoutes.Post.Handle("", api.ApiSessionRequired(deletePost)).Methods("DELETE")
+	api.BaseRoutes.Posts.Handle("/ephemeral", api.ApiSessionRequired(createEphemeralPost)).Methods("POST")
 	api.BaseRoutes.Post.Handle("/thread", api.ApiSessionRequired(getPostThread)).Methods("GET")
 	api.BaseRoutes.Post.Handle("/files/info", api.ApiSessionRequired(getFileInfosForPost)).Methods("GET")
 	api.BaseRoutes.PostsForChannel.Handle("", api.ApiSessionRequired(getPostsForChannel)).Methods("GET")
@@ -61,7 +58,7 @@ func createPost(c *Context, w http.ResponseWriter, r *http.Request) {
 		post.CreateAt = 0
 	}
 
-	rp, err := c.App.CreatePostAsUser(post)
+	rp, err := c.App.CreatePostAsUser(c.App.PostWithProxyRemovedFromImageURLs(post))
 	if err != nil {
 		c.Err = err
 		return
@@ -71,7 +68,35 @@ func createPost(c *Context, w http.ResponseWriter, r *http.Request) {
 	c.App.UpdateLastActivityAtIfNeeded(c.Session)
 
 	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte(rp.ToJson()))
+	w.Write([]byte(c.App.PostWithProxyAddedToImageURLs(rp).ToJson()))
+}
+
+func createEphemeralPost(c *Context, w http.ResponseWriter, r *http.Request) {
+	ephRequest := model.PostEphemeral{}
+
+	json.NewDecoder(r.Body).Decode(&ephRequest)
+	if ephRequest.UserID == "" {
+		c.SetInvalidParam("user_id")
+		return
+	}
+
+	if ephRequest.Post == nil {
+		c.SetInvalidParam("post")
+		return
+	}
+
+	ephRequest.Post.UserId = c.Session.UserId
+	ephRequest.Post.CreateAt = model.GetMillis()
+
+	if !c.App.SessionHasPermissionTo(c.Session, model.PERMISSION_CREATE_POST_EPHEMERAL) {
+		c.SetPermissionError(model.PERMISSION_CREATE_POST_EPHEMERAL)
+		return
+	}
+
+	rp := c.App.SendEphemeralPost(ephRequest.UserID, c.App.PostWithProxyRemovedFromImageURLs(ephRequest.Post))
+
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte(c.App.PostWithProxyAddedToImageURLs(rp).ToJson()))
 }
 
 func getPostsForChannel(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -140,7 +165,7 @@ func getPostsForChannel(c *Context, w http.ResponseWriter, r *http.Request) {
 	if len(etag) > 0 {
 		w.Header().Set(model.HEADER_ETAG_SERVER, etag)
 	}
-	w.Write([]byte(list.ToJson()))
+	w.Write([]byte(c.App.PostListWithProxyAddedToImageURLs(list).ToJson()))
 }
 
 func getFlaggedPostsForUser(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -173,7 +198,7 @@ func getFlaggedPostsForUser(c *Context, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	w.Write([]byte(posts.ToJson()))
+	w.Write([]byte(c.App.PostListWithProxyAddedToImageURLs(posts).ToJson()))
 }
 
 func getPost(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -211,7 +236,7 @@ func getPost(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	} else {
 		w.Header().Set(model.HEADER_ETAG_SERVER, post.Etag())
-		w.Write([]byte(post.ToJson()))
+		w.Write([]byte(c.App.PostWithProxyAddedToImageURLs(post).ToJson()))
 	}
 }
 
@@ -221,9 +246,22 @@ func deletePost(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !c.App.SessionHasPermissionToPost(c.Session, c.Params.PostId, model.PERMISSION_DELETE_OTHERS_POSTS) {
-		c.SetPermissionError(model.PERMISSION_DELETE_OTHERS_POSTS)
+	post, err := c.App.GetSinglePost(c.Params.PostId)
+	if err != nil {
+		c.SetPermissionError(model.PERMISSION_DELETE_POST)
 		return
+	}
+
+	if c.Session.UserId == post.UserId {
+		if !c.App.SessionHasPermissionToChannel(c.Session, post.ChannelId, model.PERMISSION_DELETE_POST) {
+			c.SetPermissionError(model.PERMISSION_DELETE_POST)
+			return
+		}
+	} else {
+		if !c.App.SessionHasPermissionToChannel(c.Session, post.ChannelId, model.PERMISSION_DELETE_OTHERS_POSTS) {
+			c.SetPermissionError(model.PERMISSION_DELETE_OTHERS_POSTS)
+			return
+		}
 	}
 
 	if _, err := c.App.DeletePost(c.Params.PostId); err != nil {
@@ -277,7 +315,7 @@ func getPostThread(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	} else {
 		w.Header().Set(model.HEADER_ETAG_SERVER, list.Etag())
-		w.Write([]byte(list.ToJson()))
+		w.Write([]byte(c.App.PostListWithProxyAddedToImageURLs(list).ToJson()))
 	}
 }
 
@@ -318,7 +356,7 @@ func searchPosts(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Write([]byte(posts.ToJson()))
+	w.Write([]byte(c.App.PostListWithProxyAddedToImageURLs(posts).ToJson()))
 }
 
 func updatePost(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -339,20 +377,28 @@ func updatePost(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !c.App.SessionHasPermissionToPost(c.Session, c.Params.PostId, model.PERMISSION_EDIT_OTHERS_POSTS) {
-		c.SetPermissionError(model.PERMISSION_EDIT_OTHERS_POSTS)
+	originalPost, err := c.App.GetSinglePost(c.Params.PostId)
+	if err != nil {
+		c.SetPermissionError(model.PERMISSION_EDIT_POST)
 		return
+	}
+
+	if c.Session.UserId != originalPost.UserId {
+		if !c.App.SessionHasPermissionToChannelByPost(c.Session, c.Params.PostId, model.PERMISSION_EDIT_OTHERS_POSTS) {
+			c.SetPermissionError(model.PERMISSION_EDIT_OTHERS_POSTS)
+			return
+		}
 	}
 
 	post.Id = c.Params.PostId
 
-	rpost, err := c.App.UpdatePost(post, false)
+	rpost, err := c.App.UpdatePost(c.App.PostWithProxyRemovedFromImageURLs(post), false)
 	if err != nil {
 		c.Err = err
 		return
 	}
 
-	w.Write([]byte(rpost.ToJson()))
+	w.Write([]byte(c.App.PostWithProxyAddedToImageURLs(rpost).ToJson()))
 }
 
 func patchPost(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -373,18 +419,26 @@ func patchPost(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !c.App.SessionHasPermissionToPost(c.Session, c.Params.PostId, model.PERMISSION_EDIT_OTHERS_POSTS) {
-		c.SetPermissionError(model.PERMISSION_EDIT_OTHERS_POSTS)
+	originalPost, err := c.App.GetSinglePost(c.Params.PostId)
+	if err != nil {
+		c.SetPermissionError(model.PERMISSION_EDIT_POST)
 		return
 	}
 
-	patchedPost, err := c.App.PatchPost(c.Params.PostId, post)
+	if c.Session.UserId != originalPost.UserId {
+		if !c.App.SessionHasPermissionToChannelByPost(c.Session, c.Params.PostId, model.PERMISSION_EDIT_OTHERS_POSTS) {
+			c.SetPermissionError(model.PERMISSION_EDIT_OTHERS_POSTS)
+			return
+		}
+	}
+
+	patchedPost, err := c.App.PatchPost(c.Params.PostId, c.App.PostPatchWithProxyRemovedFromImageURLs(post))
 	if err != nil {
 		c.Err = err
 		return
 	}
 
-	w.Write([]byte(patchedPost.ToJson()))
+	w.Write([]byte(c.App.PostWithProxyAddedToImageURLs(patchedPost).ToJson()))
 }
 
 func saveIsPinnedPost(c *Context, w http.ResponseWriter, r *http.Request, isPinned bool) {

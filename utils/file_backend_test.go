@@ -4,6 +4,7 @@
 package utils
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 )
 
@@ -23,6 +25,15 @@ type FileBackendTestSuite struct {
 }
 
 func TestLocalFileBackendTestSuite(t *testing.T) {
+	// Setup a global logger to catch tests logging outside of app context
+	// The global logger will be stomped by apps initalizing but that's fine for testing. Ideally this won't happen.
+	mlog.InitGlobalLogger(mlog.NewLogger(&mlog.LoggerConfiguration{
+		EnableConsole: true,
+		ConsoleJson:   true,
+		ConsoleLevel:  "error",
+		EnableFile:    false,
+	}))
+
 	dir, err := ioutil.TempDir("", "")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
@@ -36,6 +47,14 @@ func TestLocalFileBackendTestSuite(t *testing.T) {
 }
 
 func TestS3FileBackendTestSuite(t *testing.T) {
+	runBackendTest(t, false)
+}
+
+func TestS3FileBackendTestSuiteWithEncryption(t *testing.T) {
+	runBackendTest(t, true)
+}
+
+func runBackendTest(t *testing.T, encrypt bool) {
 	s3Host := os.Getenv("CI_HOST")
 	if s3Host == "" {
 		s3Host = "dockerhost"
@@ -51,11 +70,12 @@ func TestS3FileBackendTestSuite(t *testing.T) {
 	suite.Run(t, &FileBackendTestSuite{
 		settings: model.FileSettings{
 			DriverName:              model.NewString(model.IMAGE_DRIVER_S3),
-			AmazonS3AccessKeyId:     "minioaccesskey",
-			AmazonS3SecretAccessKey: "miniosecretkey",
-			AmazonS3Bucket:          "mattermost-test",
+			AmazonS3AccessKeyId:     model.MINIO_ACCESS_KEY,
+			AmazonS3SecretAccessKey: model.MINIO_SECRET_KEY,
+			AmazonS3Bucket:          model.MINIO_BUCKET,
 			AmazonS3Endpoint:        s3Endpoint,
 			AmazonS3SSL:             model.NewBool(false),
+			AmazonS3SSE:             model.NewBool(encrypt),
 		},
 	})
 }
@@ -63,7 +83,7 @@ func TestS3FileBackendTestSuite(t *testing.T) {
 func (s *FileBackendTestSuite) SetupTest() {
 	TranslationsPreInit()
 
-	backend, err := NewFileBackend(&s.settings)
+	backend, err := NewFileBackend(&s.settings, true)
 	require.Nil(s.T(), err)
 	s.backend = backend
 }
@@ -76,7 +96,9 @@ func (s *FileBackendTestSuite) TestReadWriteFile() {
 	b := []byte("test")
 	path := "tests/" + model.NewId()
 
-	s.Nil(s.backend.WriteFile(b, path))
+	written, err := s.backend.WriteFile(bytes.NewReader(b), path)
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
 	defer s.backend.RemoveFile(path)
 
 	read, err := s.backend.ReadFile(path)
@@ -86,18 +108,78 @@ func (s *FileBackendTestSuite) TestReadWriteFile() {
 	s.EqualValues(readString, "test")
 }
 
+func (s *FileBackendTestSuite) TestReadWriteFileImage() {
+	b := []byte("testimage")
+	path := "tests/" + model.NewId() + ".png"
+
+	written, err := s.backend.WriteFile(bytes.NewReader(b), path)
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
+	defer s.backend.RemoveFile(path)
+
+	read, err := s.backend.ReadFile(path)
+	s.Nil(err)
+
+	readString := string(read)
+	s.EqualValues(readString, "testimage")
+}
+
+func (s *FileBackendTestSuite) TestCopyFile() {
+	b := []byte("test")
+	path1 := "tests/" + model.NewId()
+	path2 := "tests/" + model.NewId()
+
+	written, err := s.backend.WriteFile(bytes.NewReader(b), path1)
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
+	defer s.backend.RemoveFile(path1)
+
+	err = s.backend.CopyFile(path1, path2)
+	s.Nil(err)
+	defer s.backend.RemoveFile(path2)
+
+	_, err = s.backend.ReadFile(path1)
+	s.Nil(err)
+
+	_, err = s.backend.ReadFile(path2)
+	s.Nil(err)
+}
+
+func (s *FileBackendTestSuite) TestCopyFileToDirectoryThatDoesntExist() {
+	b := []byte("test")
+	path1 := "tests/" + model.NewId()
+	path2 := "tests/newdirectory/" + model.NewId()
+
+	written, err := s.backend.WriteFile(bytes.NewReader(b), path1)
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
+	defer s.backend.RemoveFile(path1)
+
+	err = s.backend.CopyFile(path1, path2)
+	s.Nil(err)
+	defer s.backend.RemoveFile(path2)
+
+	_, err = s.backend.ReadFile(path1)
+	s.Nil(err)
+
+	_, err = s.backend.ReadFile(path2)
+	s.Nil(err)
+}
+
 func (s *FileBackendTestSuite) TestMoveFile() {
 	b := []byte("test")
 	path1 := "tests/" + model.NewId()
 	path2 := "tests/" + model.NewId()
 
-	s.Nil(s.backend.WriteFile(b, path1))
+	written, err := s.backend.WriteFile(bytes.NewReader(b), path1)
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
 	defer s.backend.RemoveFile(path1)
 
 	s.Nil(s.backend.MoveFile(path1, path2))
 	defer s.backend.RemoveFile(path2)
 
-	_, err := s.backend.ReadFile(path1)
+	_, err = s.backend.ReadFile(path1)
 	s.Error(err)
 
 	_, err = s.backend.ReadFile(path2)
@@ -108,15 +190,26 @@ func (s *FileBackendTestSuite) TestRemoveFile() {
 	b := []byte("test")
 	path := "tests/" + model.NewId()
 
-	s.Nil(s.backend.WriteFile(b, path))
+	written, err := s.backend.WriteFile(bytes.NewReader(b), path)
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
 	s.Nil(s.backend.RemoveFile(path))
 
-	_, err := s.backend.ReadFile(path)
+	_, err = s.backend.ReadFile(path)
 	s.Error(err)
 
-	s.Nil(s.backend.WriteFile(b, "tests2/foo"))
-	s.Nil(s.backend.WriteFile(b, "tests2/bar"))
-	s.Nil(s.backend.WriteFile(b, "tests2/asdf"))
+	written, err = s.backend.WriteFile(bytes.NewReader(b), "tests2/foo")
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
+
+	written, err = s.backend.WriteFile(bytes.NewReader(b), "tests2/bar")
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
+
+	written, err = s.backend.WriteFile(bytes.NewReader(b), "tests2/asdf")
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
+
 	s.Nil(s.backend.RemoveDirectory("tests2"))
 }
 
@@ -125,9 +218,14 @@ func (s *FileBackendTestSuite) TestListDirectory() {
 	path1 := "19700101/" + model.NewId()
 	path2 := "19800101/" + model.NewId()
 
-	s.Nil(s.backend.WriteFile(b, path1))
+	written, err := s.backend.WriteFile(bytes.NewReader(b), path1)
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
 	defer s.backend.RemoveFile(path1)
-	s.Nil(s.backend.WriteFile(b, path2))
+
+	written, err = s.backend.WriteFile(bytes.NewReader(b), path2)
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
 	defer s.backend.RemoveFile(path2)
 
 	paths, err := s.backend.ListDirectory("")
@@ -149,13 +247,21 @@ func (s *FileBackendTestSuite) TestListDirectory() {
 func (s *FileBackendTestSuite) TestRemoveDirectory() {
 	b := []byte("test")
 
-	s.Nil(s.backend.WriteFile(b, "tests2/foo"))
-	s.Nil(s.backend.WriteFile(b, "tests2/bar"))
-	s.Nil(s.backend.WriteFile(b, "tests2/aaa"))
+	written, err := s.backend.WriteFile(bytes.NewReader(b), "tests2/foo")
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
+
+	written, err = s.backend.WriteFile(bytes.NewReader(b), "tests2/bar")
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
+
+	written, err = s.backend.WriteFile(bytes.NewReader(b), "tests2/aaa")
+	s.Nil(err)
+	s.EqualValues(len(b), written, "expected given number of bytes to have been written")
 
 	s.Nil(s.backend.RemoveDirectory("tests2"))
 
-	_, err := s.backend.ReadFile("tests2/foo")
+	_, err = s.backend.ReadFile("tests2/foo")
 	s.Error(err)
 	_, err = s.backend.ReadFile("tests2/bar")
 	s.Error(err)

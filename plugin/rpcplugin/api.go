@@ -4,6 +4,7 @@
 package rpcplugin
 
 import (
+	"encoding/gob"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -29,6 +30,14 @@ func (api *LocalAPI) LoadPluginConfiguration(args struct{}, reply *[]byte) error
 	}
 	*reply = b
 	return nil
+}
+
+func (api *LocalAPI) RegisterCommand(args *model.Command, reply *APITeamReply) error {
+	return api.api.RegisterCommand(args)
+}
+
+func (api *LocalAPI) UnregisterCommand(args *APIUnregisterCommandArgs, reply *APITeamReply) error {
+	return api.api.UnregisterCommand(args.TeamId, args.Trigger)
 }
 
 type APIErrorReply struct {
@@ -154,9 +163,41 @@ type APIGetGroupChannelArgs struct {
 	UserIds []string
 }
 
+type APIAddChannelMemberArgs struct {
+	ChannelId string
+	UserId    string
+}
+
+type APIGetChannelMemberArgs struct {
+	ChannelId string
+	UserId    string
+}
+
+type APIUpdateChannelMemberRolesArgs struct {
+	ChannelId string
+	UserId    string
+	NewRoles  string
+}
+
+type APIUpdateChannelMemberNotificationsArgs struct {
+	ChannelId     string
+	UserId        string
+	Notifications map[string]string
+}
+
+type APIDeleteChannelMemberArgs struct {
+	ChannelId string
+	UserId    string
+}
+
 type APIChannelReply struct {
 	Channel *model.Channel
 	Error   *model.AppError
+}
+
+type APIChannelMemberReply struct {
+	ChannelMember *model.ChannelMember
+	Error         *model.AppError
 }
 
 func (api *LocalAPI) CreateChannel(args *model.Channel, reply *APIChannelReply) error {
@@ -220,6 +261,50 @@ func (api *LocalAPI) UpdateChannel(args *model.Channel, reply *APIChannelReply) 
 	return nil
 }
 
+func (api *LocalAPI) AddChannelMember(args *APIAddChannelMemberArgs, reply *APIChannelMemberReply) error {
+	member, err := api.api.AddChannelMember(args.ChannelId, args.UserId)
+	*reply = APIChannelMemberReply{
+		ChannelMember: member,
+		Error:         err,
+	}
+	return nil
+}
+
+func (api *LocalAPI) GetChannelMember(args *APIGetChannelMemberArgs, reply *APIChannelMemberReply) error {
+	member, err := api.api.GetChannelMember(args.ChannelId, args.UserId)
+	*reply = APIChannelMemberReply{
+		ChannelMember: member,
+		Error:         err,
+	}
+	return nil
+}
+
+func (api *LocalAPI) UpdateChannelMemberRoles(args *APIUpdateChannelMemberRolesArgs, reply *APIChannelMemberReply) error {
+	member, err := api.api.UpdateChannelMemberRoles(args.ChannelId, args.UserId, args.NewRoles)
+	*reply = APIChannelMemberReply{
+		ChannelMember: member,
+		Error:         err,
+	}
+	return nil
+}
+
+func (api *LocalAPI) UpdateChannelMemberNotifications(args *APIUpdateChannelMemberNotificationsArgs, reply *APIChannelMemberReply) error {
+	member, err := api.api.UpdateChannelMemberNotifications(args.ChannelId, args.UserId, args.Notifications)
+	*reply = APIChannelMemberReply{
+		ChannelMember: member,
+		Error:         err,
+	}
+	return nil
+}
+
+func (api *LocalAPI) DeleteChannelMember(args *APIDeleteChannelMemberArgs, reply *APIErrorReply) error {
+	err := api.api.DeleteChannelMember(args.ChannelId, args.UserId)
+	*reply = APIErrorReply{
+		Error: err,
+	}
+	return nil
+}
+
 type APIPostReply struct {
 	Post  *model.Post
 	Error *model.AppError
@@ -259,6 +344,41 @@ func (api *LocalAPI) UpdatePost(args *model.Post, reply *APIPostReply) error {
 	return nil
 }
 
+type APIKeyValueStoreReply struct {
+	Value []byte
+	Error *model.AppError
+}
+
+type APIKeyValueStoreSetArgs struct {
+	Key   string
+	Value []byte
+}
+
+func (api *LocalAPI) KeyValueStoreSet(args *APIKeyValueStoreSetArgs, reply *APIErrorReply) error {
+	err := api.api.KeyValueStore().Set(args.Key, args.Value)
+	*reply = APIErrorReply{
+		Error: err,
+	}
+	return nil
+}
+
+func (api *LocalAPI) KeyValueStoreGet(args string, reply *APIKeyValueStoreReply) error {
+	v, err := api.api.KeyValueStore().Get(args)
+	*reply = APIKeyValueStoreReply{
+		Value: v,
+		Error: err,
+	}
+	return nil
+}
+
+func (api *LocalAPI) KeyValueStoreDelete(args string, reply *APIErrorReply) error {
+	err := api.api.KeyValueStore().Delete(args)
+	*reply = APIErrorReply{
+		Error: err,
+	}
+	return nil
+}
+
 func ServeAPI(api plugin.API, conn io.ReadWriteCloser, muxer *Muxer) {
 	server := rpc.NewServer()
 	server.Register(&LocalAPI{
@@ -269,11 +389,17 @@ func ServeAPI(api plugin.API, conn io.ReadWriteCloser, muxer *Muxer) {
 }
 
 type RemoteAPI struct {
-	client *rpc.Client
-	muxer  *Muxer
+	client        *rpc.Client
+	muxer         *Muxer
+	keyValueStore *RemoteKeyValueStore
+}
+
+type RemoteKeyValueStore struct {
+	api *RemoteAPI
 }
 
 var _ plugin.API = (*RemoteAPI)(nil)
+var _ plugin.KeyValueStore = (*RemoteKeyValueStore)(nil)
 
 func (api *RemoteAPI) LoadPluginConfiguration(dest interface{}) error {
 	var config []byte
@@ -281,6 +407,22 @@ func (api *RemoteAPI) LoadPluginConfiguration(dest interface{}) error {
 		return err
 	}
 	return json.Unmarshal(config, dest)
+}
+
+func (api *RemoteAPI) RegisterCommand(command *model.Command) error {
+	return api.client.Call("LocalAPI.RegisterCommand", command, nil)
+}
+
+type APIUnregisterCommandArgs struct {
+	TeamId  string
+	Trigger string
+}
+
+func (api *RemoteAPI) UnregisterCommand(teamId, trigger string) error {
+	return api.client.Call("LocalAPI.UnregisterCommand", &APIUnregisterCommandArgs{
+		TeamId:  teamId,
+		Trigger: trigger,
+	}, nil)
 }
 
 func (api *RemoteAPI) CreateUser(user *model.User) (*model.User, *model.AppError) {
@@ -435,6 +577,63 @@ func (api *RemoteAPI) UpdateChannel(channel *model.Channel) (*model.Channel, *mo
 	return reply.Channel, reply.Error
 }
 
+func (api *RemoteAPI) AddChannelMember(channelId, userId string) (*model.ChannelMember, *model.AppError) {
+	var reply APIChannelMemberReply
+	if err := api.client.Call("LocalAPI.AddChannelMember", &APIAddChannelMemberArgs{
+		ChannelId: channelId,
+		UserId:    userId,
+	}, &reply); err != nil {
+		return nil, model.NewAppError("RemoteAPI.AddChannelMember", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.ChannelMember, reply.Error
+}
+
+func (api *RemoteAPI) GetChannelMember(channelId, userId string) (*model.ChannelMember, *model.AppError) {
+	var reply APIChannelMemberReply
+	if err := api.client.Call("LocalAPI.GetChannelMember", &APIGetChannelMemberArgs{
+		ChannelId: channelId,
+		UserId:    userId,
+	}, &reply); err != nil {
+		return nil, model.NewAppError("RemoteAPI.GetChannelMember", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.ChannelMember, reply.Error
+}
+
+func (api *RemoteAPI) UpdateChannelMemberRoles(channelId, userId, newRoles string) (*model.ChannelMember, *model.AppError) {
+	var reply APIChannelMemberReply
+	if err := api.client.Call("LocalAPI.UpdateChannelMemberRoles", &APIUpdateChannelMemberRolesArgs{
+		ChannelId: channelId,
+		UserId:    userId,
+		NewRoles:  newRoles,
+	}, &reply); err != nil {
+		return nil, model.NewAppError("RemoteAPI.UpdateChannelMemberRoles", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.ChannelMember, reply.Error
+}
+
+func (api *RemoteAPI) UpdateChannelMemberNotifications(channelId, userId string, notifications map[string]string) (*model.ChannelMember, *model.AppError) {
+	var reply APIChannelMemberReply
+	if err := api.client.Call("LocalAPI.UpdateChannelMemberNotifications", &APIUpdateChannelMemberNotificationsArgs{
+		ChannelId:     channelId,
+		UserId:        userId,
+		Notifications: notifications,
+	}, &reply); err != nil {
+		return nil, model.NewAppError("RemoteAPI.UpdateChannelMemberNotifications", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.ChannelMember, reply.Error
+}
+
+func (api *RemoteAPI) DeleteChannelMember(channelId, userId string) *model.AppError {
+	var reply APIErrorReply
+	if err := api.client.Call("LocalAPI.DeleteChannelMember", &APIDeleteChannelMemberArgs{
+		ChannelId: channelId,
+		UserId:    userId,
+	}, &reply); err != nil {
+		return model.NewAppError("RemoteAPI.DeleteChannelMember", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.Error
+}
+
 func (api *RemoteAPI) CreatePost(post *model.Post) (*model.Post, *model.AppError) {
 	var reply APIPostReply
 	if err := api.client.Call("LocalAPI.CreatePost", post, &reply); err != nil {
@@ -467,13 +666,53 @@ func (api *RemoteAPI) UpdatePost(post *model.Post) (*model.Post, *model.AppError
 	return reply.Post, reply.Error
 }
 
+func (api *RemoteAPI) KeyValueStore() plugin.KeyValueStore {
+	return api.keyValueStore
+}
+
+func (s *RemoteKeyValueStore) Set(key string, value []byte) *model.AppError {
+	var reply APIErrorReply
+	if err := s.api.client.Call("LocalAPI.KeyValueStoreSet", &APIKeyValueStoreSetArgs{Key: key, Value: value}, &reply); err != nil {
+		return model.NewAppError("RemoteAPI.KeyValueStoreSet", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.Error
+}
+
+func (s *RemoteKeyValueStore) Get(key string) ([]byte, *model.AppError) {
+	var reply APIKeyValueStoreReply
+	if err := s.api.client.Call("LocalAPI.KeyValueStoreGet", key, &reply); err != nil {
+		return nil, model.NewAppError("RemoteAPI.KeyValueStoreGet", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.Value, reply.Error
+}
+
+func (s *RemoteKeyValueStore) Delete(key string) *model.AppError {
+	var reply APIErrorReply
+	if err := s.api.client.Call("LocalAPI.KeyValueStoreDelete", key, &reply); err != nil {
+		return model.NewAppError("RemoteAPI.KeyValueStoreDelete", "plugin.rpcplugin.invocation.error", nil, "err="+err.Error(), http.StatusInternalServerError)
+	}
+	return reply.Error
+}
+
 func (h *RemoteAPI) Close() error {
 	return h.client.Close()
 }
 
 func ConnectAPI(conn io.ReadWriteCloser, muxer *Muxer) *RemoteAPI {
-	return &RemoteAPI{
-		client: rpc.NewClient(conn),
-		muxer:  muxer,
+	remoteKeyValueStore := &RemoteKeyValueStore{}
+	remoteApi := &RemoteAPI{
+		client:        rpc.NewClient(conn),
+		muxer:         muxer,
+		keyValueStore: remoteKeyValueStore,
 	}
+
+	remoteKeyValueStore.api = remoteApi
+
+	return remoteApi
+}
+
+func init() {
+	gob.Register([]*model.SlackAttachment{})
+	gob.Register([]interface{}{})
+	gob.Register(map[string]interface{}{})
 }

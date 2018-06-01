@@ -6,17 +6,16 @@ package api4
 import (
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 
-	l4g "github.com/alecthomas/log4go"
 	"github.com/mattermost/mattermost-server/app"
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 	"github.com/mattermost/mattermost-server/utils"
 )
 
 func (api *API) InitOAuth() {
-	l4g.Debug(utils.T("api.oauth.init.debug"))
-
 	api.BaseRoutes.OAuthApps.Handle("", api.ApiSessionRequired(createOAuthApp)).Methods("POST")
 	api.BaseRoutes.OAuthApp.Handle("", api.ApiSessionRequired(updateOAuthApp)).Methods("PUT")
 	api.BaseRoutes.OAuthApps.Handle("", api.ApiSessionRequired(getOAuthApps)).Methods("GET")
@@ -100,7 +99,7 @@ func updateOAuthApp(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if c.Session.UserId != oauthApp.CreatorId && !c.App.SessionHasPermissionTo(c.Session, model.PERMISSION_MANAGE_SYSTEM_WIDE_OAUTH) {
+	if c.Session.UserId != oldOauthApp.CreatorId && !c.App.SessionHasPermissionTo(c.Session, model.PERMISSION_MANAGE_SYSTEM_WIDE_OAUTH) {
 		c.SetPermissionError(model.PERMISSION_MANAGE_SYSTEM_WIDE_OAUTH)
 		return
 	}
@@ -315,7 +314,7 @@ func deauthorizeOAuthApp(c *Context, w http.ResponseWriter, r *http.Request) {
 func authorizeOAuthPage(c *Context, w http.ResponseWriter, r *http.Request) {
 	if !c.App.Config().ServiceSettings.EnableOAuthServiceProvider {
 		err := model.NewAppError("authorizeOAuth", "api.oauth.authorize_oauth.disabled.app_error", nil, "", http.StatusNotImplemented)
-		utils.RenderWebError(err, w, r)
+		utils.RenderWebAppError(w, r, err, c.App.AsymmetricSigningKey())
 		return
 	}
 
@@ -328,13 +327,13 @@ func authorizeOAuthPage(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := authRequest.IsValid(); err != nil {
-		utils.RenderWebError(err, w, r)
+		utils.RenderWebAppError(w, r, err, c.App.AsymmetricSigningKey())
 		return
 	}
 
 	oauthApp, err := c.App.GetOAuthApp(authRequest.ClientId)
 	if err != nil {
-		utils.RenderWebError(err, w, r)
+		utils.RenderWebAppError(w, r, err, c.App.AsymmetricSigningKey())
 		return
 	}
 
@@ -345,7 +344,8 @@ func authorizeOAuthPage(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !oauthApp.IsValidRedirectURL(authRequest.RedirectUri) {
-		utils.RenderWebError(model.NewAppError("authorizeOAuthPage", "api.oauth.allow_oauth.redirect_callback.app_error", nil, "", http.StatusBadRequest), w, r)
+		err := model.NewAppError("authorizeOAuthPage", "api.oauth.allow_oauth.redirect_callback.app_error", nil, "", http.StatusBadRequest)
+		utils.RenderWebAppError(w, r, err, c.App.AsymmetricSigningKey())
 		return
 	}
 
@@ -362,7 +362,7 @@ func authorizeOAuthPage(c *Context, w http.ResponseWriter, r *http.Request) {
 		redirectUrl, err := c.App.AllowOAuthAppAccessToUser(c.Session.UserId, authRequest)
 
 		if err != nil {
-			utils.RenderWebError(err, w, r)
+			utils.RenderWebAppError(w, r, err, c.App.AsymmetricSigningKey())
 			return
 		}
 
@@ -376,7 +376,7 @@ func authorizeOAuthPage(c *Context, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, max-age=31556926, public")
 
 	staticDir, _ := utils.FindDir(model.CLIENT_DIR)
-	http.ServeFile(w, r, staticDir+"root.html")
+	http.ServeFile(w, r, filepath.Join(staticDir, "root.html"))
 }
 
 func getAccessToken(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -443,7 +443,10 @@ func completeOAuth(c *Context, w http.ResponseWriter, r *http.Request) {
 
 	code := r.URL.Query().Get("code")
 	if len(code) == 0 {
-		http.Redirect(w, r, c.GetSiteURLHeader()+"/error?type=oauth_missing_code&service="+strings.Title(service), http.StatusTemporaryRedirect)
+		utils.RenderWebError(w, r, http.StatusTemporaryRedirect, url.Values{
+			"type":    []string{"oauth_missing_code"},
+			"service": []string{strings.Title(service)},
+		}, c.App.AsymmetricSigningKey())
 		return
 	}
 
@@ -460,11 +463,11 @@ func completeOAuth(c *Context, w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		err.Translate(c.T)
-		l4g.Error(err.Error())
+		mlog.Error(err.Error())
 		if action == model.OAUTH_ACTION_MOBILE {
 			w.Write([]byte(err.ToJson()))
 		} else {
-			http.Redirect(w, r, c.GetSiteURLHeader()+"/error?message="+url.QueryEscape(err.Message), http.StatusTemporaryRedirect)
+			utils.RenderWebAppError(w, r, err, c.App.AsymmetricSigningKey())
 		}
 		return
 	}
@@ -472,11 +475,11 @@ func completeOAuth(c *Context, w http.ResponseWriter, r *http.Request) {
 	user, err := c.App.CompleteOAuth(service, body, teamId, props)
 	if err != nil {
 		err.Translate(c.T)
-		l4g.Error(err.Error())
+		mlog.Error(err.Error())
 		if action == model.OAUTH_ACTION_MOBILE {
 			w.Write([]byte(err.ToJson()))
 		} else {
-			http.Redirect(w, r, c.GetSiteURLHeader()+"/error?message="+url.QueryEscape(err.Message), http.StatusTemporaryRedirect)
+			utils.RenderWebAppError(w, r, err, c.App.AsymmetricSigningKey())
 		}
 		return
 	}
@@ -560,8 +563,10 @@ func signupWithOAuth(c *Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !c.App.Config().TeamSettings.EnableUserCreation {
-		c.Err = model.NewAppError("signupWithOAuth", "api.oauth.singup_with_oauth.disabled.app_error", nil, "", http.StatusNotImplemented)
+	if !*c.App.Config().TeamSettings.EnableUserCreation {
+		utils.RenderWebError(w, r, http.StatusBadRequest, url.Values{
+			"message": []string{utils.T("api.oauth.singup_with_oauth.disabled.app_error")},
+		}, c.App.AsymmetricSigningKey())
 		return
 	}
 

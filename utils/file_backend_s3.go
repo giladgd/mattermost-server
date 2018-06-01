@@ -4,17 +4,18 @@
 package utils
 
 import (
-	"bytes"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
-	l4g "github.com/alecthomas/log4go"
 	s3 "github.com/minio/minio-go"
 	"github.com/minio/minio-go/pkg/credentials"
+	"github.com/minio/minio-go/pkg/encrypt"
 
+	"github.com/mattermost/mattermost-server/mlog"
 	"github.com/mattermost/mattermost-server/model"
 )
 
@@ -37,7 +38,10 @@ type S3FileBackend struct {
 // disables automatic region lookup.
 func (b *S3FileBackend) s3New() (*s3.Client, error) {
 	var creds *credentials.Credentials
-	if b.signV2 {
+
+	if b.accessKey == "" && b.secretKey == "" {
+		creds = credentials.NewIAM("")
+	} else if b.signV2 {
 		creds = credentials.NewStatic(b.accessKey, b.secretKey, "", credentials.SignatureV2)
 	} else {
 		creds = credentials.NewStatic(b.accessKey, b.secretKey, "", credentials.SignatureV4)
@@ -67,14 +71,14 @@ func (b *S3FileBackend) TestConnection() *model.AppError {
 	}
 
 	if !exists {
-		l4g.Warn("Bucket specified does not exist. Attempting to create...")
+		mlog.Warn("Bucket specified does not exist. Attempting to create...")
 		err := s3Clnt.MakeBucket(b.bucket, b.region)
 		if err != nil {
-			l4g.Error("Unable to create bucket.")
+			mlog.Error("Unable to create bucket.")
 			return model.NewAppError("TestFileConnection", "Unable to create bucket", nil, err.Error(), http.StatusInternalServerError)
 		}
 	}
-	l4g.Info("Connection to S3 or minio is good. Bucket exists.")
+	mlog.Info("Connection to S3 or minio is good. Bucket exists.")
 	return nil
 }
 
@@ -83,7 +87,7 @@ func (b *S3FileBackend) ReadFile(path string) ([]byte, *model.AppError) {
 	if err != nil {
 		return nil, model.NewAppError("ReadFile", "api.file.read_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
 	}
-	minioObject, err := s3Clnt.GetObject(b.bucket, path)
+	minioObject, err := s3Clnt.GetObject(b.bucket, path, s3.GetObjectOptions{})
 	if err != nil {
 		return nil, model.NewAppError("ReadFile", "api.file.read_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
 	}
@@ -95,6 +99,23 @@ func (b *S3FileBackend) ReadFile(path string) ([]byte, *model.AppError) {
 	}
 }
 
+func (b *S3FileBackend) CopyFile(oldPath, newPath string) *model.AppError {
+	s3Clnt, err := b.s3New()
+	if err != nil {
+		return model.NewAppError("copyFile", "api.file.write_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
+	}
+
+	source := s3.NewSourceInfo(b.bucket, oldPath, nil)
+	destination, err := s3.NewDestinationInfo(b.bucket, newPath, encrypt.NewSSE(), nil)
+	if err != nil {
+		return model.NewAppError("copyFile", "api.file.write_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
+	}
+	if err = s3Clnt.CopyObject(destination, source); err != nil {
+		return model.NewAppError("copyFile", "api.file.move_file.copy_within_s3.app_error", nil, err.Error(), http.StatusInternalServerError)
+	}
+	return nil
+}
+
 func (b *S3FileBackend) MoveFile(oldPath, newPath string) *model.AppError {
 	s3Clnt, err := b.s3New()
 	if err != nil {
@@ -102,12 +123,12 @@ func (b *S3FileBackend) MoveFile(oldPath, newPath string) *model.AppError {
 	}
 
 	source := s3.NewSourceInfo(b.bucket, oldPath, nil)
-	destination, err := s3.NewDestinationInfo(b.bucket, newPath, nil, s3CopyMetadata(b.encrypt))
+	destination, err := s3.NewDestinationInfo(b.bucket, newPath, encrypt.NewSSE(), nil)
 	if err != nil {
 		return model.NewAppError("moveFile", "api.file.write_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
 	}
 	if err = s3Clnt.CopyObject(destination, source); err != nil {
-		return model.NewAppError("moveFile", "api.file.move_file.delete_from_s3.app_error", nil, err.Error(), http.StatusInternalServerError)
+		return model.NewAppError("moveFile", "api.file.move_file.copy_within_s3.app_error", nil, err.Error(), http.StatusInternalServerError)
 	}
 	if err = s3Clnt.RemoveObject(b.bucket, oldPath); err != nil {
 		return model.NewAppError("moveFile", "api.file.move_file.delete_from_s3.app_error", nil, err.Error(), http.StatusInternalServerError)
@@ -115,23 +136,26 @@ func (b *S3FileBackend) MoveFile(oldPath, newPath string) *model.AppError {
 	return nil
 }
 
-func (b *S3FileBackend) WriteFile(f []byte, path string) *model.AppError {
+func (b *S3FileBackend) WriteFile(fr io.Reader, path string) (int64, *model.AppError) {
 	s3Clnt, err := b.s3New()
 	if err != nil {
-		return model.NewAppError("WriteFile", "api.file.write_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
+		return 0, model.NewAppError("WriteFile", "api.file.write_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
 	}
 
-	ext := filepath.Ext(path)
-	metaData := s3Metadata(b.encrypt, "binary/octet-stream")
-	if model.IsFileExtImage(ext) {
-		metaData = s3Metadata(b.encrypt, model.GetImageMimeType(ext))
+	var contentType string
+	if ext := filepath.Ext(path); model.IsFileExtImage(ext) {
+		contentType = model.GetImageMimeType(ext)
+	} else {
+		contentType = "binary/octet-stream"
 	}
 
-	if _, err = s3Clnt.PutObjectWithMetadata(b.bucket, path, bytes.NewReader(f), metaData, nil); err != nil {
-		return model.NewAppError("WriteFile", "api.file.write_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
+	options := s3PutOptions(b.encrypt, contentType)
+	written, err := s3Clnt.PutObject(b.bucket, path, fr, -1, options)
+	if err != nil {
+		return written, model.NewAppError("WriteFile", "api.file.write_file.s3.app_error", nil, err.Error(), http.StatusInternalServerError)
 	}
 
-	return nil
+	return written, nil
 }
 
 func (b *S3FileBackend) RemoveFile(path string) *model.AppError {
@@ -208,19 +232,25 @@ func (b *S3FileBackend) RemoveDirectory(path string) *model.AppError {
 	return nil
 }
 
-func s3Metadata(encrypt bool, contentType string) map[string][]string {
-	metaData := make(map[string][]string)
-	if contentType != "" {
-		metaData["Content-Type"] = []string{"contentType"}
+func s3PutOptions(encrypted bool, contentType string) s3.PutObjectOptions {
+	options := s3.PutObjectOptions{}
+	if encrypted {
+		options.ServerSideEncryption = encrypt.NewSSE()
 	}
-	if encrypt {
-		metaData["x-amz-server-side-encryption"] = []string{"AES256"}
-	}
-	return metaData
+	options.ContentType = contentType
+
+	return options
 }
 
-func s3CopyMetadata(encrypt bool) map[string]string {
-	metaData := make(map[string]string)
-	metaData["x-amz-server-side-encryption"] = "AES256"
-	return metaData
+func CheckMandatoryS3Fields(settings *model.FileSettings) *model.AppError {
+	if len(settings.AmazonS3Bucket) == 0 {
+		return model.NewAppError("S3File", "api.admin.test_s3.missing_s3_bucket", nil, "", http.StatusBadRequest)
+	}
+
+	// if S3 endpoint is not set call the set defaults to set that
+	if len(settings.AmazonS3Endpoint) == 0 {
+		settings.SetDefaults()
+	}
+
+	return nil
 }
